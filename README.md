@@ -21,15 +21,16 @@ A document processing API built with Landing AI ADE (Agentic Document Extraction
   - summary
   - text (full contract text)
 - **RESTful GET Endpoints**: Retrieve invoices and contracts with pagination support
+- **RAG Query Endpoint**: Query contracts using semantic search with LLM-generated answers (Retrieval-Augmented Generation)
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.8+ (or Docker for containerized deployment)
 - PostgreSQL database (AWS RDS) with pgvector extension
 - Landing AI API key
-- OpenAI API key (for embeddings)
+- Google Gemini API key (for embeddings)
 
 ### Installation
 
@@ -58,12 +59,32 @@ Edit `.env` and fill in your configuration:
 - `GEMINI_API_KEY`: Your Google Gemini API key (get it from [Google AI Studio](https://aistudio.google.com/))
 - `EMBEDDING_MODEL`: Embedding model (default: models/embedding-001 for Gemini)
 - `EMBEDDING_DIMENSIONS`: Vector dimensions (default: 768 for Gemini embeddings)
+- `GEMINI_GENERATION_MODEL`: Gemini model for text generation/RAG (default: gemini-1.5-flash)
 - `UPLOAD_DIR`: Temporary directory for file uploads (default: /tmp)
 - `MAX_FILE_SIZE`: Maximum file size in bytes (default: 10485760 = 10MB)
 
 ### Database Setup
 
 The application will automatically create the necessary tables on startup. Ensure your PostgreSQL database has the pgvector extension available.
+
+### Docker Setup (Alternative)
+
+You can also run the application using Docker. See [DOCKER.md](DOCKER.md) for detailed instructions.
+
+**Quick start with Docker Compose:**
+```bash
+# Create .env file with your configuration
+cp .env.example .env
+# Edit .env with your API keys and database credentials
+
+# Start services (API + PostgreSQL with pgvector)
+docker-compose up -d
+
+# View logs
+docker-compose logs -f api
+```
+
+The API will be available at `http://localhost:8001`
 
 ## Running the API
 
@@ -549,6 +570,209 @@ const fetchContractById = async (contractId) => {
   }
 }
 ```
+
+### Query Contracts (RAG)
+
+**POST** `/query_contracts`
+
+Query contracts using RAG (Retrieval-Augmented Generation). This endpoint:
+1. Searches contracts using semantic vector similarity
+2. Uses an LLM (Gemini) to generate an answer based on retrieved contracts
+3. Returns only the generated answer (not the source contracts)
+
+**Request Body (JSON):**
+- `query` (required): The search query text/question
+- `id` (optional): Database ID to filter search to a specific contract
+- `limit` (optional): Maximum number of contracts to retrieve (1-100, default: 10)
+- `similarity_threshold` (optional): Minimum similarity score (0.0-1.0, default: 0.0)
+
+**Content-Type:** `application/json`
+
+**Example using curl:**
+```bash
+# Query all contracts
+curl -X POST "http://localhost:8001/query_contracts" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What are the payment terms?"
+  }'
+
+# Query with limit
+curl -X POST "http://localhost:8001/query_contracts" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What are the payment terms?",
+    "limit": 5
+  }'
+
+# Query specific contract by database ID
+curl -X POST "http://localhost:8001/query_contracts" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What are the termination clauses?",
+    "id": 5
+  }'
+
+# Query with similarity threshold
+curl -X POST "http://localhost:8001/query_contracts" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What are the liability clauses?",
+    "limit": 10,
+    "similarity_threshold": 0.5
+  }'
+```
+
+**Example using React/JavaScript:**
+```javascript
+const queryContracts = async (query, contractId = null, limit = 10) => {
+  try {
+    const payload = {
+      query: query,
+      limit: limit
+    };
+    
+    if (contractId) {
+      payload.id = contractId;
+    }
+    
+    const response = await fetch('http://localhost:8001/query_contracts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Error querying contracts:', error);
+    throw error;
+  }
+};
+
+// Usage
+const result = await queryContracts("What are the payment terms?");
+console.log("Answer:", result.answer);
+```
+
+**Example using React with Axios:**
+```javascript
+import axios from 'axios';
+
+const queryContracts = async (query, options = {}) => {
+  const { id, limit = 10, similarity_threshold = 0.0 } = options;
+  
+  const payload = {
+    query: query,
+    limit: limit,
+    similarity_threshold: similarity_threshold
+  };
+  
+  if (id) {
+    payload.id = id;
+  }
+  
+  try {
+    const response = await axios.post(
+      'http://localhost:8001/query_contracts',
+      payload,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 60000, // 1 minute timeout
+      }
+    );
+    
+    return response.data;
+  } catch (error) {
+    if (error.response) {
+      console.error('Error:', error.response.data);
+      throw new Error(error.response.data.detail || 'Query failed');
+    } else {
+      console.error('Error:', error.message);
+      throw error;
+    }
+  }
+};
+
+// Usage in React component
+function ContractQuery() {
+  const [query, setQuery] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [loading, setLoading] = useState(false);
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    
+    try {
+      const result = await queryContracts(query);
+      setAnswer(result.answer);
+    } catch (error) {
+      alert(`Query failed: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  return (
+    <div>
+      <form onSubmit={handleSubmit}>
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Ask a question about contracts..."
+          required
+        />
+        <button type="submit" disabled={loading}>
+          {loading ? 'Querying...' : 'Query'}
+        </button>
+      </form>
+      {answer && (
+        <div>
+          <h3>Answer:</h3>
+          <p>{answer}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "answer": "Based on the retrieved contracts, the payment terms specify that invoices are due within 30 days of receipt. Payment should be made via wire transfer to the account specified in the contract. Late payments may incur a 1.5% monthly interest charge."
+}
+```
+
+**No Results Found:**
+```json
+{
+  "success": true,
+  "answer": "No relevant contracts found matching your query."
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": true,
+  "answer": "Unable to generate answer: [error message]"
+}
+```
+
+**Note:** This endpoint uses RAG (Retrieval-Augmented Generation) technology:
+- It first retrieves relevant contracts using vector similarity search
+- Then uses an LLM (Gemini) to generate a natural language answer based on the retrieved contracts
+- Only the generated answer is returned, not the source contracts
 
 ### Health Check
 
