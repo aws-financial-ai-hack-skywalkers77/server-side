@@ -114,29 +114,20 @@ async def get_invoices(
             detail=f"Error retrieving invoices: {str(e)}"
         )
 
-@app.get("/invoices/{invoice_id}")
-async def get_invoice_by_id(invoice_id: str):
-    """
-    Get invoice metadata by invoice_id.
-    
-    Args:
-        invoice_id: The invoice ID to retrieve
-    
-    Returns:
-        JSON response with invoice metadata
-    """
+@app.get("/invoices/{db_id}")
+async def get_invoice_by_db_id(db_id: int):
     try:
-        invoice = db.get_invoice_by_id(invoice_id)
+        invoice = db.get_invoice_by_db_id(db_id)
         
         if not invoice:
             raise HTTPException(
                 status_code=404,
-                detail=f"Invoice with invoice_id '{invoice_id}' not found"
+                    detail=f"Invoice with database ID '{db_id}' not found"
             )
         
         # Format response
         response_metadata = {
-            'id': invoice.get('id'),
+            'db_id': invoice.get('id'),
             'invoice_id': invoice.get('invoice_id'),
             'seller_name': invoice.get('seller_name'),
             'seller_address': invoice.get('seller_address'),
@@ -213,29 +204,29 @@ async def get_contracts(
             detail=f"Error retrieving contracts: {str(e)}"
         )
 
-@app.get("/contracts/{contract_id}")
-async def get_contract_by_id(contract_id: str):
+@app.get("/contracts/{db_id}")
+async def get_contract_by_db_id(db_id: int):
     """
-    Get contract metadata by contract_id.
+    Get contract metadata by database ID.
     
     Args:
-        contract_id: The contract ID to retrieve
+        db_id: The database ID to retrieve
     
     Returns:
         JSON response with contract metadata
     """
     try:
-        contract = db.get_contract_by_id(contract_id)
+        contract = db.get_contract_by_db_id(db_id)
         
         if not contract:
             raise HTTPException(
                 status_code=404,
-                detail=f"Contract with contract_id '{contract_id}' not found"
+                detail=f"Contract with database ID '{db_id}' not found"
             )
         
         # Format response
         response_metadata = {
-            'id': contract.get('id'),
+            'db_id': contract.get('id'),
             'contract_id': contract.get('contract_id'),
             'summary': contract.get('summary'),
             'text': contract.get('text'),
