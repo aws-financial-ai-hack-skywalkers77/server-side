@@ -133,9 +133,9 @@ curl -X POST "http://localhost:8001/upload_document" \
 
 ### Analyze Single Invoice (Compliance)
 
-**POST** `/analyze_invoice/{invoice_id}`
+**POST** `/analyze_invoice/{invoice_db_id}`
 
-Trigger compliance analysis for a specific invoice. The service:
+Trigger compliance analysis for a specific invoice (identified by its database ID). The service:
 
 - Retrieves invoice metadata and stored line items from PostgreSQL (AWS RDS)
 - Runs pgvector similarity search to fetch relevant contract clauses
@@ -160,6 +160,14 @@ Trigger compliance analysis for a specific invoice. The service:
   "next_run_scheduled_in_hours": 4
 }
 ```
+
+**Example curl:**
+```bash
+curl -X POST "http://localhost:8001/analyze_invoice/123" \
+  -H "Accept: application/json"
+```
+
+`123` is the invoices table primary key. Use `GET /invoices` to discover IDs if needed.
 
 ### Analyze Invoices (Bulk Compliance)
 
