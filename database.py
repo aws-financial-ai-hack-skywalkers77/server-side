@@ -3,6 +3,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from config import Config
 import logging
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +66,31 @@ class Database:
                     CREATE TABLE IF NOT EXISTS contracts (
                         id SERIAL PRIMARY KEY,
                         contract_id VARCHAR(255),
+                        vendor_name VARCHAR(500),
+                        effective_date VARCHAR(50),
+                        start_date VARCHAR(50),
+                        end_date VARCHAR(50),
+                        pricing_sections TEXT,
+                        service_types JSONB,
                         text TEXT,
                         summary TEXT,
+                        clauses JSONB,
                         vector vector({vector_dim}),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
+                """)
+                
+                # Add new columns to existing contracts table if they don't exist (for migrations)
+                cur.execute("""
+                    ALTER TABLE contracts
+                    ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(500),
+                    ADD COLUMN IF NOT EXISTS effective_date VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS start_date VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS end_date VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS pricing_sections TEXT,
+                    ADD COLUMN IF NOT EXISTS service_types JSONB,
+                    ADD COLUMN IF NOT EXISTS clauses JSONB;
                 """)
                 
                 # Ensure invoices table has compliance tracking columns
@@ -253,6 +273,48 @@ class Database:
             logger.error(f"Error getting invoices count: {e}")
             raise
 
+    def insert_invoice_line_items(self, invoice_db_id, line_items):
+        """Insert line items for an invoice"""
+        self.connect()
+        if not line_items:
+            return []
+        try:
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                inserted = []
+                for item in line_items:
+                    metadata = item.get('metadata', {})
+                    metadata_json = json.dumps(metadata)
+                    logger.debug(f"Inserting line item '{item.get('description', '')[:50]}' with metadata: {metadata_json}")
+                    
+                    insert_query = """
+                        INSERT INTO invoice_line_items (
+                            invoice_id, line_id, description, service_code,
+                            quantity, unit_price, total_price, metadata
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        RETURNING id, line_id, description, service_code,
+                                  quantity, unit_price, total_price;
+                    """
+                    cur.execute(insert_query, (
+                        invoice_db_id,
+                        item.get('line_id'),
+                        item.get('description', ''),
+                        item.get('service_code'),
+                        item.get('quantity'),
+                        item.get('unit_price'),
+                        item.get('total_price'),
+                        metadata_json
+                    ))
+                    result = cur.fetchone()
+                    if result:
+                        inserted.append(dict(result))
+                self.conn.commit()
+                logger.info(f"Inserted {len(inserted)} line items for invoice ID {invoice_db_id}")
+                return inserted
+        except Exception as e:
+            logger.error(f"Error inserting invoice line items: {e}")
+            self.conn.rollback()
+            raise
+
     def get_invoice_line_items(self, invoice_db_id):
         """Retrieve line items for a specific invoice"""
         self.connect()
@@ -311,6 +373,19 @@ class Database:
             self.conn.rollback()
             raise
 
+    def _convert_decimals_to_float(self, obj):
+        """
+        Recursively convert Decimal objects to float for JSON serialization.
+        """
+        if isinstance(obj, Decimal):
+            return float(obj)
+        elif isinstance(obj, dict):
+            return {key: self._convert_decimals_to_float(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_decimals_to_float(item) for item in obj]
+        else:
+            return obj
+
     def save_compliance_report(self, invoice_db_id, invoice_number, status, violations, pricing_rules, llm_metadata=None, next_run_at=None):
         """Persist compliance evaluation results"""
         self.connect()
@@ -329,9 +404,14 @@ class Database:
                     ) VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, %s)
                     RETURNING id, processed_at;
                 """
-                violations_json = json.dumps(violations or [])
-                pricing_rules_json = json.dumps(pricing_rules or {})
-                metadata_json = json.dumps(llm_metadata or {})
+                # Convert Decimal to float before JSON serialization
+                violations_clean = self._convert_decimals_to_float(violations or [])
+                pricing_rules_clean = self._convert_decimals_to_float(pricing_rules or {})
+                metadata_clean = self._convert_decimals_to_float(llm_metadata or {})
+                
+                violations_json = json.dumps(violations_clean)
+                pricing_rules_json = json.dumps(pricing_rules_clean)
+                metadata_json = json.dumps(metadata_clean)
                 cur.execute(
                     insert_query,
                     (
@@ -409,16 +489,29 @@ class Database:
                 # Convert vector list to pgvector format: '[0.1, 0.2, ...]'
                 vector_str = '[' + ','.join(map(str, vector)) + ']'
                 
+                # Convert service_types and clauses to JSONB format
+                service_types_json = json.dumps(metadata.get('service_types', []))
+                clauses_json = json.dumps(metadata.get('clauses', []))
+                
                 insert_query = """
                     INSERT INTO contracts (
-                        contract_id, summary, text, vector
-                    ) VALUES (%s, %s, %s, %s::vector)
-                    RETURNING id, contract_id, summary, text, created_at;
+                        contract_id, vendor_name, effective_date, start_date, end_date,
+                        pricing_sections, service_types, summary, text, clauses, vector
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s::vector)
+                    RETURNING id, contract_id, vendor_name, effective_date, start_date, end_date,
+                              pricing_sections, service_types, summary, text, clauses, created_at;
                 """
                 cur.execute(insert_query, (
                     metadata.get('contract_id'),
+                    metadata.get('vendor_name'),
+                    metadata.get('effective_date'),
+                    metadata.get('start_date'),
+                    metadata.get('end_date'),
+                    metadata.get('pricing_sections'),
+                    service_types_json,
                     metadata.get('summary'),
                     metadata.get('text'),
+                    clauses_json,
                     vector_str
                 ))
                 result = cur.fetchone()
@@ -480,8 +573,17 @@ class Database:
             logger.error(f"Error getting contracts count: {e}")
             raise
 
-    def search_contracts_by_similarity(self, query_vector, limit=10, similarity_threshold=0.0, contract_id=None):
-        """Perform vector similarity search over contracts"""
+    def search_contracts_by_similarity(self, query_vector, limit=10, similarity_threshold=0.0, contract_id=None, vendor_name=None):
+        """
+        Perform vector similarity search over contracts.
+        
+        Args:
+            query_vector: Vector embedding for similarity search
+            limit: Maximum number of results
+            similarity_threshold: Minimum similarity score (0.0-1.0)
+            contract_id: Optional specific contract ID to filter
+            vendor_name: Optional vendor/seller name - only contracts containing this name will be returned
+        """
         self.connect()
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -490,16 +592,41 @@ class Database:
                     SELECT
                         id,
                         contract_id,
+                        vendor_name,
+                        effective_date,
+                        start_date,
+                        end_date,
+                        pricing_sections,
+                        service_types,
                         summary,
                         text,
+                        clauses,
                         1 - (vector <=> %s::vector) AS similarity
                     FROM contracts
                 """
                 params = [vector_str]
                 where_clauses = []
+                
                 if contract_id is not None:
                     where_clauses.append("id = %s")
                     params.append(contract_id)
+                
+                # Hard filter: only include contracts that mention the vendor name
+                if vendor_name:
+                    # Normalize vendor name for matching (remove common business suffixes)
+                    vendor_normalized = vendor_name.strip()
+                    # Remove common business entity suffixes for better matching
+                    for suffix in [' Inc.', ' Inc', '. Inc', ' LLC', ' Ltd.', ' Ltd', ' Corporation', ' Corp.', ' Corp']:
+                        if vendor_normalized.endswith(suffix):
+                            vendor_normalized = vendor_normalized[:-len(suffix)].strip()
+                    
+                    # First check vendor_name field (most reliable), then fallback to text/summary/contract_id
+                    where_clauses.append(
+                        "(LOWER(vendor_name) LIKE %s OR LOWER(text) LIKE %s OR LOWER(summary) LIKE %s OR LOWER(contract_id) LIKE %s)"
+                    )
+                    vendor_pattern = f"%{vendor_normalized.lower()}%"
+                    params.extend([vendor_pattern, vendor_pattern, vendor_pattern, vendor_pattern])
+                    logger.info(f"Filtering contracts by vendor name: '{vendor_name}' (normalized: '{vendor_normalized}')")
 
                 if where_clauses:
                     base_query += " WHERE " + " AND ".join(where_clauses)
@@ -516,6 +643,13 @@ class Database:
                         if record['similarity'] is None or record['similarity'] < similarity_threshold:
                             continue
                     filtered.append(record)
+                
+                if vendor_name and len(filtered) == 0:
+                    logger.warning(
+                        f"No contracts found matching vendor '{vendor_name}' even after similarity search. "
+                        "This may indicate the contract doesn't exist for this vendor, or vendor name doesn't match."
+                    )
+                
                 return filtered
         except Exception as e:
             logger.error(f"Error searching contracts by similarity: {e}")
