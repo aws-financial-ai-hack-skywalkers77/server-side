@@ -109,6 +109,32 @@ def upload_file_content_to_s3(file_content: bytes, s3_key: str, content_type: st
         logger.error(f"Error uploading file to S3: {e}")
         raise Exception(f"Failed to upload file to S3: {str(e)}")
 
+def get_presigned_url_for_s3_key(s3_key: str, expires_in: int = 10800) -> str:
+    """
+    Generate a presigned URL for an existing S3 object.
+    
+    Args:
+        s3_key: S3 object key (path in bucket)
+        expires_in: Expiration time in seconds (default: 10800 = 3 hours)
+    
+    Returns:
+        Presigned S3 URL
+    
+    Raises:
+        Exception: If URL generation fails
+    """
+    try:
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': Config.S3_BUCKET_NAME, 'Key': s3_key},
+            ExpiresIn=expires_in
+        )
+        logger.info(f"Generated presigned URL for S3 key: {s3_key} (valid for {expires_in} seconds)")
+        return presigned_url
+    except ClientError as e:
+        logger.error(f"Error generating presigned URL: {e}")
+        raise Exception(f"Failed to generate presigned URL: {str(e)}")
+
 # Create tables on startup
 @app.on_event("startup")
 async def startup_event():
@@ -389,9 +415,9 @@ async def upload_document(
         # Vectorize the metadata
         vector = vectorizer.vectorize_metadata(metadata)
         
-        # Store in database based on document type
+        # Store in database based on document type with S3 key
         if doc_type == 'invoice':
-            stored_record = db.insert_invoice(metadata, vector)
+            stored_record = db.insert_invoice(metadata, vector, s3_key=s3_key)
             invoice_db_id = stored_record.get('id')
             
             # Store line items if they were extracted
@@ -419,7 +445,7 @@ async def upload_document(
                 'created_at': stored_record.get('created_at').isoformat() if stored_record.get('created_at') else None
             }
         elif doc_type == 'contract':
-            stored_record = db.insert_contract(metadata, vector)
+            stored_record = db.insert_contract(metadata, vector, s3_key=s3_key)
             logger.info(f"Successfully processed and stored contract: {metadata.get('contract_id')}")
             
             # Return contract metadata
@@ -610,6 +636,84 @@ async def query_contracts(request: ContractQueryRequest = Body(...)):
         raise HTTPException(
             status_code=500,
             detail=f"Error querying contracts: {str(e)}"
+        )
+
+@app.get("/documents/{document_type}/{db_id}/download_url")
+async def get_document_download_url(
+    document_type: str,
+    db_id: int
+):
+    """
+    Get a presigned S3 URL for downloading a document.
+    
+    Args:
+        document_type: Type of document ('invoice' or 'contract')
+        db_id: Database ID of the document
+    
+    Returns:
+        JSON response with presigned URL (valid for 3 hours)
+    """
+    # Validate document type
+    doc_type = document_type.lower()
+    if doc_type not in ['invoice', 'contract']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Document type '{document_type}' not supported. Supported types: 'invoice', 'contract'"
+        )
+    
+    try:
+        # Get S3 key from database
+        if doc_type == 'invoice':
+            s3_key = db.get_invoice_s3_key(db_id)
+            if not s3_key:
+                # Check if invoice exists
+                invoice = db.get_invoice_by_db_id(db_id)
+                if not invoice:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Invoice with database ID '{db_id}' not found"
+                    )
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"S3 key not found for invoice with database ID '{db_id}'"
+                )
+        else:  # contract
+            s3_key = db.get_contract_s3_key(db_id)
+            if not s3_key:
+                # Check if contract exists
+                contract = db.get_contract_by_db_id(db_id)
+                if not contract:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Contract with database ID '{db_id}' not found"
+                    )
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"S3 key not found for contract with database ID '{db_id}'"
+                )
+        
+        # Generate presigned URL (valid for 3 hours = 10800 seconds)
+        presigned_url = get_presigned_url_for_s3_key(s3_key, expires_in=10800)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "document_type": doc_type,
+                "db_id": db_id,
+                "s3_key": s3_key,
+                "presigned_url": presigned_url,
+                "expires_in_seconds": 10800,
+                "expires_in_hours": 3
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating download URL for {doc_type} {db_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating download URL: {str(e)}"
         )
 
 if __name__ == "__main__":
