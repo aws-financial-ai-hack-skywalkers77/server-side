@@ -6,6 +6,9 @@ from typing import Optional, List
 import os
 import logging
 from pathlib import Path
+from datetime import datetime
+import boto3
+from botocore.exceptions import ClientError
 from config import Config
 from database import Database
 from compliance_engine import ComplianceEngine
@@ -63,6 +66,48 @@ db = Database()
 document_processor = DocumentProcessor()
 vectorizer = Vectorizer()
 compliance_engine = ComplianceEngine(db=db, vectorizer=vectorizer)
+
+# Initialize S3 client
+s3_client = boto3.client('s3', region_name=Config.AWS_REGION)
+
+def upload_file_content_to_s3(file_content: bytes, s3_key: str, content_type: str = "application/pdf") -> str:
+    """
+    Upload file content directly to S3 bucket from memory.
+    
+    Args:
+        file_content: File content as bytes
+        s3_key: S3 object key (path in bucket)
+        content_type: MIME type of the file (default: application/pdf)
+    
+    Returns:
+        Presigned S3 URL of the uploaded file (valid for 1 hour)
+    
+    Raises:
+        Exception: If upload fails
+    """
+    try:
+        logger.info(f"Uploading file to S3: {s3_key}")
+        s3_client.put_object(
+            Bucket=Config.S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=file_content,
+            ContentType=content_type
+        )
+        
+        # Generate presigned URL (valid for 1 hour)
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': Config.S3_BUCKET_NAME, 'Key': s3_key},
+            ExpiresIn=3600  # 1 hour
+        )
+        
+        s3_uri = f"s3://{Config.S3_BUCKET_NAME}/{s3_key}"
+        logger.info(f"Successfully uploaded file to S3: {s3_uri}")
+        logger.info(f"Presigned URL generated (valid for 1 hour)")
+        return presigned_url
+    except ClientError as e:
+        logger.error(f"Error uploading file to S3: {e}")
+        raise Exception(f"Failed to upload file to S3: {str(e)}")
 
 # Create tables on startup
 @app.on_event("startup")
@@ -308,30 +353,38 @@ async def upload_document(
             detail="Only PDF files are supported"
         )
     
-    # Save uploaded file temporarily
-    upload_dir = Path(Config.UPLOAD_DIR)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
-    file_path = upload_dir / file.filename
+    # Generate unique filename with timestamp to avoid conflicts
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
     try:
-        # Save file
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            if len(content) > Config.MAX_FILE_SIZE:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"File size exceeds maximum allowed size of {Config.MAX_FILE_SIZE} bytes"
-                )
-            buffer.write(content)
+        # Read file content into memory
+        content = await file.read()
+        if len(content) > Config.MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File size exceeds maximum allowed size of {Config.MAX_FILE_SIZE} bytes"
+            )
         
         logger.info(f"Processing document: {file.filename} (type: {document_type})")
         
-        # Extract data using Landing AI ADE based on document type
+        # Upload to S3 directly from memory (mandatory)
+        # Create S3 key with document type prefix and original filename
+        s3_key = f"{doc_type}s/{timestamp}_{file.filename}"
+        try:
+            s3_url = upload_file_content_to_s3(content, s3_key)
+            logger.info(f"File uploaded to S3: {s3_url}")
+        except Exception as e:
+            logger.error(f"Failed to upload to S3: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload file to S3: {str(e)}"
+            )
+        
+        # Extract data using Landing AI ADE based on document type using S3 URL
         if doc_type == 'invoice':
-            metadata = document_processor.extract_invoice_data(str(file_path))
+            metadata = document_processor.extract_invoice_data(s3_url)
         elif doc_type == 'contract':
-            metadata = document_processor.extract_contract_data(str(file_path))
+            metadata = document_processor.extract_contract_data(s3_url)
         
         # Vectorize the metadata
         vector = vectorizer.vectorize_metadata(metadata)
@@ -394,14 +447,6 @@ async def upload_document(
             status_code=500,
             detail=f"Error processing document: {str(e)}"
         )
-    finally:
-        # Clean up temporary file
-        if file_path.exists():
-            try:
-                os.remove(file_path)
-                logger.info(f"Cleaned up temporary file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Error removing temporary file: {e}")
 
 @app.post("/analyze_invoice/{invoice_db_id}")
 async def analyze_invoice(invoice_db_id: int):

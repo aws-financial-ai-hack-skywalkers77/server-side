@@ -27,4 +27,8 @@ class Config:
     # File upload configuration
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp")
     MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "10485760"))  # 10MB default
+    
+    # AWS S3 Configuration
+    S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "landing-ai-aws-hack")
+    AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 

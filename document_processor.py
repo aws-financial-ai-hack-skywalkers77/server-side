@@ -12,32 +12,32 @@ class DocumentProcessor:
         # Try both parameter names for API key compatibility
         self.ade_client = LandingAIADE(apikey=Config.LANDING_AI_API_KEY)
     
-    def extract_contract_data(self, file_path):
+    def extract_contract_data(self, document_url):
         """
         Extract contract data using Landing AI ADE.
-        Returns a dictionary with contract metadata.
+        
+        Args:
+            document_url: S3 presigned URL to the document
+        
+        Returns:
+            Dictionary with contract metadata.
         """
         try:
             # Parse the document
-            logger.info(f"Parsing document: {file_path}")
+            logger.info(f"Parsing document from S3 URL: {document_url}")
             logger.info("Calling Landing AI ADE parse API... (this may take a while)")
             
             # Check if API key is set
             if not Config.LANDING_AI_API_KEY:
                 raise ValueError("LANDING_AI_API_KEY is not set in environment variables")
             
-            # Open file in binary mode for ADE
-            with open(file_path, 'rb') as file:
-                file_size = len(file.read())
-                file.seek(0)  # Reset file pointer
-                logger.info(f"File size: {file_size} bytes")
-                
-                logger.info("Sending request to Landing AI ADE...")
-                response = self.ade_client.parse(
-                    document=file,
-                    model="dpt-2-latest"
-                )
-                logger.info("Received response from Landing AI ADE parse API")
+            logger.info("Sending request to Landing AI ADE with document URL...")
+            # Landing AI ADE accepts URLs directly
+            response = self.ade_client.parse(
+                document_url=document_url,
+                model="dpt-2-latest"
+            )
+            logger.info("Received response from Landing AI ADE parse API")
                 
             # Define the schema for contract extraction
             schema = {
@@ -416,32 +416,32 @@ class DocumentProcessor:
             # Return line items without bounding boxes if matching fails
             return line_items
     
-    def extract_invoice_data(self, file_path):
+    def extract_invoice_data(self, document_url):
         """
         Extract invoice data using Landing AI ADE.
-        Returns a dictionary with invoice metadata.
+        
+        Args:
+            document_url: S3 presigned URL to the document
+        
+        Returns:
+            Dictionary with invoice metadata.
         """
         try:
             # Parse the document
-            logger.info(f"Parsing document: {file_path}")
+            logger.info(f"Parsing document from S3 URL: {document_url}")
             logger.info("Calling Landing AI ADE parse API... (this may take a while)")
             
             # Check if API key is set
             if not Config.LANDING_AI_API_KEY:
                 raise ValueError("LANDING_AI_API_KEY is not set in environment variables")
             
-            # Open file in binary mode for ADE
-            with open(file_path, 'rb') as file:
-                file_size = len(file.read())
-                file.seek(0)  # Reset file pointer
-                logger.info(f"File size: {file_size} bytes")
-                
-                logger.info("Sending request to Landing AI ADE...")
-                response = self.ade_client.parse(
-                    document=file,
-                    model="dpt-2-latest"
-                )
-                logger.info("Received response from Landing AI ADE parse API")
+            logger.info("Sending request to Landing AI ADE with document URL...")
+            # Landing AI ADE accepts URLs directly
+            response = self.ade_client.parse(
+                document_url=document_url,
+                model="dpt-2-latest"
+            )
+            logger.info("Received response from Landing AI ADE parse API")
             
             # Define the schema for invoice extraction
             schema = {
