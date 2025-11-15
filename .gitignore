@@ -47,3 +47,4 @@ Thumbs.db
 uploads/
 *.log
 .venv1/
+PRESENTATION_DESCRIPTION.md

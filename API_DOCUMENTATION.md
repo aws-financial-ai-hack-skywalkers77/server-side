@@ -180,8 +180,14 @@ curl -X PATCH "http://localhost:8001/api/v1/workflow1/resolve/1"
 
 ## 🌍 WORKFLOW 2: Jurisdiction Comparison Engine
 
+**Purpose**: Helps tax professionals (CAs) understand differences between two tax jurisdictions. Perfect for CAs who know one jurisdiction and need to learn another quickly.
+
+---
+
 ### 1. Create Jurisdiction Comparison
 **Endpoint**: `POST /api/v1/workflow2/compare`
+
+**Description**: Compares tax rules between two jurisdictions using AI-powered analysis. Extracts relevant laws from the knowledge base and identifies key differences.
 
 **Request**: JSON body
 ```json
@@ -194,6 +200,13 @@ curl -X PATCH "http://localhost:8001/api/v1/workflow1/resolve/1"
 }
 ```
 
+**Request Parameters**:
+- `base_jurisdiction` (string, required): The jurisdiction the CA already knows (e.g., "US-NY", "US-CA", "US-FED")
+- `target_jurisdiction` (string, required): The jurisdiction the CA wants to learn (e.g., "US-CA", "US-NY", "EU-DE")
+- `scope` (string, optional, default: "individual_income"): Type of tax to compare. Options: "individual_income", "corporate", "vat"
+- `tax_year` (integer, optional, default: current year): Which year's tax laws to compare (e.g., 2024)
+- `requested_by` (string, optional): User identifier (email, username, etc.)
+
 **Response** (200 OK):
 ```json
 {
@@ -202,52 +215,93 @@ curl -X PATCH "http://localhost:8001/api/v1/workflow1/resolve/1"
   "target_jurisdiction": "US-CA",
   "scope": "individual_income",
   "tax_year": 2024,
-  "status": "completed",
-  "summary": {
-    "total_differences": 5,
-    "critical_differences": 2,
-    "high_priority_differences": 2,
-    "medium_priority_differences": 1
-  },
+  "created_at": "2024-11-15T00:13:55",
+  "total_differences": 5,
+  "critical_differences": 2,
+  "important_differences": 2,
+  "informational_differences": 1,
   "differences": [
     {
-      "category": "tax_rates",
-      "severity": "critical",
-      "base_value": "Progressive: 4% - 10.9%",
-      "target_value": "Progressive: 1% - 13.3%",
-      "description": "NY has higher top marginal rate (10.9%) vs CA (13.3%)",
-      "impact": "CA residents pay higher taxes on high income"
+      "difference_type": "tax_rate",
+      "category": "rates",
+      "base_rule": "NY has progressive rates from 4% to 10.9%",
+      "target_rule": "CA has progressive rates from 1% to 13.3%",
+      "impact_level": "critical",
+      "explanation": "CA has higher top marginal rate (13.3%) vs NY (10.9%), affecting high-income taxpayers",
+      "examples": [
+        "A taxpayer earning $200,000 would pay 10.9% in NY vs 13.3% in CA on income above $1M"
+      ],
+      "base_law_ids": [123, 124, 125],
+      "target_law_ids": [456, 457, 458]
+    },
+    {
+      "difference_type": "deduction",
+      "category": "deductions",
+      "base_rule": "NY standard deduction is $8,000 for single filers",
+      "target_rule": "CA standard deduction is $5,202 for single filers",
+      "impact_level": "important",
+      "explanation": "NY offers higher standard deduction, reducing taxable income more",
+      "examples": [
+        "Single filer in NY can deduct $2,798 more than in CA"
+      ],
+      "base_law_ids": [126],
+      "target_law_ids": [459]
+    },
+    {
+      "difference_type": "filing_deadline",
+      "category": "filing",
+      "base_rule": "NY filing deadline is April 15",
+      "target_rule": "CA filing deadline is April 15 (same as federal)",
+      "impact_level": "informational",
+      "explanation": "Both jurisdictions use the same filing deadline",
+      "examples": [],
+      "base_law_ids": [127],
+      "target_law_ids": [460]
+    }
+  ],
+  "learning_checklist": [
+    {
+      "category": "rates",
+      "priority": "high",
+      "title": "Master rates differences (CRITICAL)",
+      "item_count": 2,
+      "items": [
+        "Understand CA's higher top marginal rate",
+        "Learn CA's rate brackets"
+      ]
     },
     {
       "category": "deductions",
-      "severity": "high",
-      "base_value": "Standard deduction: $8,000",
-      "target_value": "Standard deduction: $5,202",
-      "description": "NY offers higher standard deduction",
-      "impact": "NY residents can deduct more before calculating taxable income"
+      "priority": "medium",
+      "title": "Learn deduction differences",
+      "item_count": 1,
+      "items": [
+        "CA has lower standard deduction than NY"
+      ]
     }
-  ],
-  "created_at": "2024-11-15T00:13:55"
+  ]
 }
 ```
 
-**Note**: The response structure may vary. When retrieved via GET endpoint, it returns:
-```json
-{
-  "comparison": {
-    "comparison_id": "COMP-E0FD44E6",
-    "base_jurisdiction": "US-NY",
-    "target_jurisdiction": "US-CA",
-    "comparison_scope": "individual_income",
-    "tax_year": 2024,
-    "comparison_results": {
-      "differences": []
-    },
-    "created_at": "2024-11-15T00:13:55"
-  },
-  "differences": []
-}
-```
+**Response Fields**:
+- `comparison_id`: Unique identifier (format: `COMP-XXXXXXXX`)
+- `total_differences`: Total number of differences found
+- `critical_differences`: Count of critical differences
+- `important_differences`: Count of important differences
+- `informational_differences`: Count of informational differences
+- `differences`: Array of difference objects, each containing:
+  - `difference_type`: Type of difference (tax_rate, deduction, filing_deadline, etc.)
+  - `category`: High-level category (rates, deductions, filing)
+  - `base_rule`: How it works in the base jurisdiction
+  - `target_rule`: How it works in the target jurisdiction
+  - `impact_level`: "critical", "important", or "informational"
+  - `explanation`: Why the difference matters
+  - `examples`: Array of practical examples
+  - `base_law_ids`: IDs of source laws from base jurisdiction
+  - `target_law_ids`: IDs of source laws from target jurisdiction
+- `learning_checklist`: Organized checklist to help CAs learn the target jurisdiction
+
+**Processing Time**: 20-30 seconds (LLM processing)
 
 **Example cURL**:
 ```bash
@@ -262,10 +316,37 @@ curl -X POST "http://localhost:8001/api/v1/workflow2/compare" \
   }'
 ```
 
+**Example JavaScript**:
+```javascript
+const response = await fetch('http://localhost:8001/api/v1/workflow2/compare', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    base_jurisdiction: 'US-NY',
+    target_jurisdiction: 'US-CA',
+    scope: 'individual_income',
+    tax_year: 2024,
+    requested_by: 'user@example.com'
+  })
+});
+const comparison = await response.json();
+console.log(`Found ${comparison.total_differences} differences`);
+```
+
+**Error Responses**:
+- `400 Bad Request`: Invalid request parameters
+- `404 Not Found`: No tax laws found for specified jurisdictions
+- `500 Internal Server Error`: Database or LLM error
+
 ---
 
 ### 2. Get Comparison
 **Endpoint**: `GET /api/v1/workflow2/comparison/{comparison_id}`
+
+**Description**: Retrieves a previously created comparison by its ID.
+
+**Path Parameters**:
+- `comparison_id` (string, required): The comparison ID (format: `COMP-XXXXXXXX`)
 
 **Response** (200 OK):
 ```json
@@ -277,27 +358,53 @@ curl -X POST "http://localhost:8001/api/v1/workflow2/compare" \
     "target_jurisdiction": "US-CA",
     "comparison_scope": "individual_income",
     "tax_year": 2024,
-    "requested_by": null,
+    "requested_by": "user@example.com",
     "comparison_results": {
       "differences": []
     },
     "created_at": "2024-11-15T00:13:55"
   },
-  "differences": []
+  "differences": [
+    {
+      "id": 1,
+      "comparison_id": "COMP-E0FD44E6",
+      "difference_type": "tax_rate",
+      "category": "rates",
+      "base_rule": "NY has progressive rates from 4% to 10.9%",
+      "target_rule": "CA has progressive rates from 1% to 13.3%",
+      "impact_level": "critical",
+      "explanation": "CA has higher top marginal rate",
+      "examples": ["..."],
+      "created_at": "2024-11-15T00:13:55"
+    }
+  ]
 }
 ```
 
-**Note**: The `differences` array may be empty if no differences are found. The `comparison_results` object contains the full comparison analysis.
+**Note**: The `differences` array may be empty if no differences were found. The `comparison_results` object contains the full comparison analysis stored in the database.
 
 **Example cURL**:
 ```bash
 curl "http://localhost:8001/api/v1/workflow2/comparison/COMP-E0FD44E6"
 ```
 
+**Example JavaScript**:
+```javascript
+const response = await fetch('http://localhost:8001/api/v1/workflow2/comparison/COMP-E0FD44E6');
+const data = await response.json();
+console.log(`Comparison: ${data.comparison.base_jurisdiction} vs ${data.comparison.target_jurisdiction}`);
+console.log(`Differences: ${data.differences.length}`);
+```
+
+**Error Responses**:
+- `404 Not Found`: Comparison ID not found
+
 ---
 
 ### 3. Research Specific Topic
 **Endpoint**: `POST /api/v1/workflow2/research`
+
+**Description**: Deep dive research on a specific tax topic across two jurisdictions. More focused than a full comparison.
 
 **Request**: JSON body
 ```json
@@ -308,6 +415,12 @@ curl "http://localhost:8001/api/v1/workflow2/comparison/COMP-E0FD44E6"
   "tax_year": 2024
 }
 ```
+
+**Request Parameters**:
+- `base_jurisdiction` (string, required): The jurisdiction the CA knows
+- `target_jurisdiction` (string, required): The jurisdiction to research
+- `topic` (string, required): Specific topic to research (e.g., "capital gains tax rates", "standard deduction", "filing deadlines")
+- `tax_year` (integer, optional, default: current year): Which year's laws to research
 
 **Response** (200 OK):
 ```json
@@ -320,17 +433,26 @@ curl "http://localhost:8001/api/v1/workflow2/comparison/COMP-E0FD44E6"
     {
       "jurisdiction": "US-NY",
       "information": "NY treats capital gains as ordinary income, subject to state income tax rates (4% - 10.9%)",
-      "source": "NY State Tax Law 2024"
+      "source": "NY State Tax Law 2024",
+      "section_reference": "Section 601"
     },
     {
       "jurisdiction": "US-CA",
       "information": "CA also treats capital gains as ordinary income, with rates from 1% - 13.3%",
-      "source": "CA State Tax Law 2024"
+      "source": "CA State Tax Law 2024",
+      "section_reference": "Section 17041"
     }
   ],
-  "comparison": "Both jurisdictions treat capital gains as ordinary income, but CA has higher top rates"
+  "comparison": "Both jurisdictions treat capital gains as ordinary income, but CA has higher top rates (13.3% vs 10.9%)",
+  "key_differences": [
+    "CA's top rate is 2.4 percentage points higher than NY's",
+    "Both use progressive rate structures"
+  ],
+  "practical_implications": "High-income taxpayers in CA will pay more on capital gains than in NY"
 }
 ```
+
+**Processing Time**: 15-25 seconds (LLM processing)
 
 **Example cURL**:
 ```bash
@@ -343,6 +465,28 @@ curl -X POST "http://localhost:8001/api/v1/workflow2/research" \
     "tax_year": 2024
   }'
 ```
+
+**Example JavaScript**:
+```javascript
+const response = await fetch('http://localhost:8001/api/v1/workflow2/research', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    base_jurisdiction: 'US-NY',
+    target_jurisdiction: 'US-CA',
+    topic: 'capital gains tax rates',
+    tax_year: 2024
+  })
+});
+const research = await response.json();
+console.log(`Topic: ${research.topic}`);
+console.log(`Findings: ${research.findings.length} jurisdictions`);
+```
+
+**Error Responses**:
+- `400 Bad Request`: Invalid request parameters
+- `404 Not Found`: No information found for the topic
+- `500 Internal Server Error`: Database or LLM error
 
 ---
 

@@ -310,10 +310,22 @@ class TaxDocumentParser:
             if not gemini_api_key:
                 raise ValueError("GEMINI_API_KEY not set - cannot use LLM extraction")
             genai.configure(api_key=gemini_api_key)
-            model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-1.5-pro'
+            model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-2.5-flash'
             if model_name.startswith('models/'):
                 model_name = model_name.replace('models/', '')
-            model = genai.GenerativeModel(model_name)
+            try:
+                model = genai.GenerativeModel(model_name)
+            except Exception as e:
+                try:
+                    # Fallback to gemini-2.5-flash (stable, available)
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                except Exception as e2:
+                    try:
+                        # Second fallback to gemini-2.0-flash-001
+                        model = genai.GenerativeModel('gemini-2.0-flash-001')
+                    except Exception as e3:
+                        # Final fallback to gemini-flash-latest
+                        model = genai.GenerativeModel('gemini-flash-latest')
             
             # Create a focused prompt with a sample of the markdown
             # Get first 8000 chars to include more form header info

@@ -35,13 +35,32 @@ class MultiJurisdictionPlanningEngine:
         else:
             genai.configure(api_key=gemini_api_key)
             # Use model from config, fallback to gemini-1.5-pro
-            from config import Config
-            model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-1.5-pro'
-            # Remove 'models/' prefix if present (generation models don't use it)
-            if model_name.startswith('models/'):
-                model_name = model_name.replace('models/', '')
-            print(f"🤖 Initializing Gemini model: {model_name} with API key: {'*' * 10 + gemini_api_key[-4:] if gemini_api_key else 'NOT SET'}")
+        from config import Config
+        model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-2.5-flash'
+        # Remove 'models/' prefix if present (generation models don't use it)
+        if model_name.startswith('models/'):
+            model_name = model_name.replace('models/', '')
+        print(f"🤖 Initializing Gemini model: {model_name} with API key: {'*' * 10 + gemini_api_key[-4:] if gemini_api_key else 'NOT SET'}")
+        try:
             self.model = genai.GenerativeModel(model_name)
+        except Exception as e:
+            print(f"⚠️  Failed to initialize {model_name}, trying gemini-2.5-flash as fallback: {e}")
+            try:
+                # Fallback to gemini-2.5-flash (stable, available)
+                self.model = genai.GenerativeModel('gemini-2.5-flash')
+                print(f"✅ Using fallback model: gemini-2.5-flash")
+            except Exception as e2:
+                print(f"⚠️  gemini-2.5-flash also failed, trying gemini-2.0-flash-001...")
+                try:
+                    self.model = genai.GenerativeModel('gemini-2.0-flash-001')
+                    print(f"✅ Using fallback model: gemini-2.0-flash-001")
+                except Exception as e3:
+                    try:
+                        self.model = genai.GenerativeModel('gemini-flash-latest')
+                        print(f"✅ Using fallback model: gemini-flash-latest")
+                    except Exception as e4:
+                        print(f"❌ All model initialization failed!")
+                        raise e
     
     async def create_planning_scenario(
         self,

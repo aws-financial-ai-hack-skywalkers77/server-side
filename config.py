@@ -40,9 +40,9 @@ class Config:
     # OpenAI Configuration for embeddings (alternative to Gemini)
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     # Gemini model for text generation (RAG)
-    # Options: "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"
-    # Note: gemini-2.5-pro doesn't exist, use gemini-1.5-pro instead
-    GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "gemini-1.5-pro")
+    # Options: "gemini-2.5-flash" (stable, recommended), "gemini-2.0-flash-001", "gemini-flash-latest"
+    # Note: Use models that are actually available in your API key
+    GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "gemini-2.5-flash")
     
     # File upload configuration
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp")
