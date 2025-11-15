@@ -34,7 +34,8 @@ class MultiJurisdictionPlanningEngine:
             print("⚠️ WARNING: GEMINI_API_KEY is not set! LLM calls will fail.")
         else:
             genai.configure(api_key=gemini_api_key)
-            # Use model from config, fallback to gemini-1.5-pro
+        
+        # Use model from config, fallback to gemini-2.5-flash
         from config import Config
         model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-2.5-flash'
         # Remove 'models/' prefix if present (generation models don't use it)
@@ -466,38 +467,123 @@ Return JSON:
         
         try:
             print(f"🤖 Calling LLM to analyze exposure for {jurisdiction}...")
-            print(f"   Income sources: {len(income_sources)}")
-            response = self.model.generate_content(prompt)
-            result_text = response.text
-            print(f"✅ LLM response received for {jurisdiction} ({len(result_text)} chars)")
-            print(f"   First 200 chars: {result_text[:200]}")
+            print(f"   Income sources: {len(local_income)}")
             
+            # Try to generate content, with fallback if model not available
+            try:
+                response = self.model.generate_content(prompt)
+                result_text = response.text
+            except Exception as model_error:
+                error_str = str(model_error)
+                if "404" in error_str or "not found" in error_str.lower() or "not supported" in error_str.lower():
+                    print(f"⚠️  Model not available, trying gemini-2.5-flash fallback...")
+                    # Fallback to gemini-2.5-flash
+                    try:
+                        fallback_model = genai.GenerativeModel('gemini-2.5-flash')
+                        response = fallback_model.generate_content(prompt)
+                        result_text = response.text
+                        print(f"✅ Successfully used fallback model: gemini-2.5-flash")
+                    except Exception as e2:
+                        print(f"⚠️  gemini-2.5-flash also failed, trying gemini-2.0-flash-001...")
+                        try:
+                            fallback_model = genai.GenerativeModel('gemini-2.0-flash-001')
+                            response = fallback_model.generate_content(prompt)
+                            result_text = response.text
+                            print(f"✅ Successfully used fallback model: gemini-2.0-flash-001")
+                        except Exception as e3:
+                            print(f"⚠️  gemini-2.0-flash-001 also failed, trying gemini-flash-latest...")
+                            try:
+                                fallback_model = genai.GenerativeModel('gemini-flash-latest')
+                                response = fallback_model.generate_content(prompt)
+                                result_text = response.text
+                                print(f"✅ Successfully used fallback model: gemini-flash-latest")
+                            except Exception as e4:
+                                print(f"❌ All model fallbacks failed!")
+                                print(f"   Original error: {error_str}")
+                                raise model_error
+                else:
+                    raise
+            
+            print(f"✅ LLM response received for {jurisdiction} ({len(result_text)} chars)")
+            print(f"   First 300 chars: {result_text[:300]}")
+            
+            # Save original for debugging
+            original_text = result_text
+            
+            # Extract JSON - improved parsing
             if '```json' in result_text:
                 parts = result_text.split('```json')
                 if len(parts) > 1:
                     json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
                     result_text = json_part
-                else:
-                    # Try regular ``` code blocks
-                    parts = result_text.split('```')
-                    if len(parts) > 1:
-                        result_text = parts[1]
+                    print(f"   Found ```json block, extracted {len(result_text)} chars")
+            elif '```' in result_text:
+                parts = result_text.split('```')
+                if len(parts) > 1:
+                    result_text = parts[1]
+                    print(f"   Found ``` block, extracted {len(result_text)} chars")
             
-            exposure = json.loads(result_text.strip())
+            # Clean up the JSON string
+            result_text = result_text.strip()
+            result_text = result_text.strip(' \n\r\t')
+            
+            # Try to find JSON object in the text if it's not at the start
+            if not result_text.startswith('{'):
+                print(f"   ⚠️  Response doesn't start with '{{', searching for JSON object...")
+                import re
+                json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+                if json_match:
+                    result_text = json_match.group(0)
+                    print(f"   ✅ Found JSON object, length: {len(result_text)}")
+                else:
+                    print(f"   ❌ No JSON object found in response")
+                    print(f"   Full response (first 1000 chars): {original_text[:1000]}")
+            
+            print(f"🔍 Attempting to parse JSON (length: {len(result_text)})")
+            print(f"   First 500 chars: {result_text[:500]}")
+            
+            # Try to parse JSON
+            try:
+                exposure = json.loads(result_text)
+            except json.JSONDecodeError as parse_error:
+                print(f"❌ JSON parsing failed: {parse_error}")
+                print(f"   Error at position: {parse_error.pos if hasattr(parse_error, 'pos') else 'unknown'}")
+                print(f"   Text around error: {result_text[max(0, parse_error.pos-50):parse_error.pos+50] if hasattr(parse_error, 'pos') else 'N/A'}")
+                print(f"   Full response (first 1500 chars): {original_text[:1500]}")
+                return None
+            
+            # Validate exposure structure
+            if not isinstance(exposure, dict):
+                print(f"⚠️  WARNING: LLM returned non-dict type: {type(exposure)}")
+                return None
+            
+            if not exposure.get('exposure_type'):
+                print(f"⚠️  WARNING: LLM returned exposure without 'exposure_type'")
+                print(f"   Full response: {original_text[:1000]}")
+                return None
+            
             print(f"✅ Parsed exposure analysis for {jurisdiction}")
-            if not exposure or (isinstance(exposure, dict) and not exposure.get('exposure_type')):
-                print(f"⚠️  WARNING: LLM returned empty/invalid exposure")
-                print(f"   Full response: {result_text[:500]}")
+            print(f"   Exposure type: {exposure.get('exposure_type')}")
+            print(f"   Risk level: {exposure.get('risk_level')}")
             return exposure
         
         except json.JSONDecodeError as json_error:
             print(f"❌ JSON parsing error for {jurisdiction}: {json_error}")
-            print(f"   Response text: {result_text[:500] if 'result_text' in locals() else 'N/A'}")
+            print(f"   Error details: {str(json_error)}")
+            if 'result_text' in locals():
+                print(f"   Response text (first 1000 chars): {result_text[:1000]}")
+            if 'original_text' in locals():
+                print(f"   Original response (first 1500 chars): {original_text[:1500]}")
             import traceback
             traceback.print_exc()
             return None
         except Exception as e:
-            print(f"❌ Error analyzing exposure for {jurisdiction}: {e}")
+            print(f"❌ Error analyzing exposure for {jurisdiction}: {type(e).__name__}: {e}")
+            print(f"   Error details: {str(e)}")
+            if 'result_text' in locals():
+                print(f"   Response text (first 1000 chars): {result_text[:1000] if 'result_text' in locals() else 'N/A'}")
+            if 'original_text' in locals():
+                print(f"   Original response (first 1500 chars): {original_text[:1500] if 'original_text' in locals() else 'N/A'}")
             import traceback
             traceback.print_exc()
             return None
@@ -523,17 +609,19 @@ Return JSON:
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
             
             cursor = self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cursor.execute("""
+            # Use f-string for embedding to avoid parameter binding issues with pgvector
+            # Note: %% escapes % in f-strings for LIKE clauses
+            cursor.execute(f"""
                 SELECT 
                     chunk_text,
                     section_reference,
                     document_title
                 FROM tax_laws
                 WHERE jurisdiction = %s
-                AND law_category LIKE '%filing%'
-                ORDER BY embedding <=> %s::vector
+                AND law_category LIKE '%%filing%%'
+                ORDER BY embedding <=> '{embedding_str}'::vector
                 LIMIT 5
-            """, (jurisdiction, embedding_str))
+            """, (jurisdiction,))
             
             law_results = cursor.fetchall()
             cursor.close()
@@ -592,24 +680,75 @@ Return JSON array:
 """
         
         try:
-            response = self.model.generate_content(prompt)
-            result_text = response.text
+            # Try to generate content, with fallback if model not available
+            try:
+                response = self.model.generate_content(prompt)
+                result_text = response.text
+            except Exception as model_error:
+                error_str = str(model_error)
+                if "404" in error_str or "not found" in error_str.lower() or "not supported" in error_str.lower():
+                    print(f"⚠️  Model not available, trying gemini-2.5-flash fallback...")
+                    try:
+                        fallback_model = genai.GenerativeModel('gemini-2.5-flash')
+                        response = fallback_model.generate_content(prompt)
+                        result_text = response.text
+                    except Exception as e2:
+                        try:
+                            fallback_model = genai.GenerativeModel('gemini-2.0-flash-001')
+                            response = fallback_model.generate_content(prompt)
+                            result_text = response.text
+                        except Exception as e3:
+                            fallback_model = genai.GenerativeModel('gemini-flash-latest')
+                            response = fallback_model.generate_content(prompt)
+                            result_text = response.text
+                else:
+                    raise
             
+            # Save original for debugging
+            original_text = result_text
+            
+            # Extract JSON - improved parsing
             if '```json' in result_text:
                 parts = result_text.split('```json')
                 if len(parts) > 1:
                     json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
                     result_text = json_part
-                else:
-                    # Try regular ``` code blocks
-                    parts = result_text.split('```')
-                    if len(parts) > 1:
-                        result_text = parts[1]
+            elif '```' in result_text:
+                parts = result_text.split('```')
+                if len(parts) > 1:
+                    result_text = parts[1]
             
-            return json.loads(result_text.strip())
+            # Clean up the JSON string
+            result_text = result_text.strip()
+            result_text = result_text.strip(' \n\r\t')
+            
+            # Try to find JSON array in the text if it's not at the start
+            if not result_text.startswith('['):
+                import re
+                array_match = re.search(r'\[.*\]', result_text, re.DOTALL)
+                if array_match:
+                    result_text = array_match.group(0)
+            
+            try:
+                requirements = json.loads(result_text)
+            except json.JSONDecodeError as parse_error:
+                print(f"❌ JSON parsing error for requirements: {parse_error}")
+                print(f"   Full response (first 1500 chars): {original_text[:1500]}")
+                return []
+            
+            # Validate structure
+            if not isinstance(requirements, list):
+                if isinstance(requirements, dict):
+                    requirements = [requirements]
+                else:
+                    return []
+            
+            return requirements
         
         except Exception as e:
-            print(f"❌ Error extracting requirements: {e}")
+            print(f"❌ Error extracting requirements: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     async def _generate_recommendations(
@@ -669,33 +808,151 @@ Focus on PRACTICAL actions that will make a real difference.
         
         try:
             print(f"🤖 Calling LLM to generate recommendations...")
-            response = self.model.generate_content(prompt)
-            result_text = response.text
-            print(f"✅ LLM response received for recommendations ({len(result_text)} chars)")
+            print(f"   Client: {client_name}")
+            print(f"   Jurisdictions: {len(jurisdictions)}")
+            print(f"   Exposures: {len(exposures)}")
+            print(f"   Treaties: {len(treaties)}")
             
+            # Try to generate content, with fallback if model not available
+            try:
+                response = self.model.generate_content(prompt)
+                result_text = response.text
+            except Exception as model_error:
+                error_str = str(model_error)
+                if "404" in error_str or "not found" in error_str.lower() or "not supported" in error_str.lower():
+                    print(f"⚠️  Model not available, trying gemini-2.5-flash fallback...")
+                    # Fallback to gemini-2.5-flash
+                    try:
+                        fallback_model = genai.GenerativeModel('gemini-2.5-flash')
+                        response = fallback_model.generate_content(prompt)
+                        result_text = response.text
+                        print(f"✅ Successfully used fallback model: gemini-2.5-flash")
+                    except Exception as e2:
+                        print(f"⚠️  gemini-2.5-flash also failed, trying gemini-2.0-flash-001...")
+                        try:
+                            fallback_model = genai.GenerativeModel('gemini-2.0-flash-001')
+                            response = fallback_model.generate_content(prompt)
+                            result_text = response.text
+                            print(f"✅ Successfully used fallback model: gemini-2.0-flash-001")
+                        except Exception as e3:
+                            print(f"⚠️  gemini-2.0-flash-001 also failed, trying gemini-flash-latest...")
+                            try:
+                                fallback_model = genai.GenerativeModel('gemini-flash-latest')
+                                response = fallback_model.generate_content(prompt)
+                                result_text = response.text
+                                print(f"✅ Successfully used fallback model: gemini-flash-latest")
+                            except Exception as e4:
+                                print(f"❌ All model fallbacks failed!")
+                                print(f"   Original error: {error_str}")
+                                raise model_error
+                else:
+                    raise
+            
+            print(f"✅ LLM response received for recommendations ({len(result_text)} chars)")
+            print(f"   First 300 chars: {result_text[:300]}")
+            
+            # Save original for debugging
+            original_text = result_text
+            
+            # Extract JSON - improved parsing
             if '```json' in result_text:
                 parts = result_text.split('```json')
                 if len(parts) > 1:
                     json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
                     result_text = json_part
-                else:
-                    # Try regular ``` code blocks
-                    parts = result_text.split('```')
-                    if len(parts) > 1:
-                        result_text = parts[1]
+                    print(f"   Found ```json block, extracted {len(result_text)} chars")
+            elif '```' in result_text:
+                parts = result_text.split('```')
+                if len(parts) > 1:
+                    result_text = parts[1]
+                    print(f"   Found ``` block, extracted {len(result_text)} chars")
             
-            recommendations = json.loads(result_text.strip())
+            # Clean up the JSON string
+            result_text = result_text.strip()
+            result_text = result_text.strip(' \n\r\t')
+            
+            # Try to find JSON array in the text if it's not at the start
+            if not result_text.startswith('['):
+                print(f"   ⚠️  Response doesn't start with '[', searching for array pattern...")
+                import re
+                array_match = re.search(r'\[.*\]', result_text, re.DOTALL)
+                if array_match:
+                    result_text = array_match.group(0)
+                    print(f"   ✅ Found array pattern, length: {len(result_text)}")
+                else:
+                    print(f"   ❌ No array pattern found in response")
+                    print(f"   Full response (first 1000 chars): {original_text[:1000]}")
+            
+            print(f"🔍 Attempting to parse JSON (length: {len(result_text)})")
+            print(f"   First 500 chars: {result_text[:500]}")
+            
+            # Try to parse JSON
+            try:
+                recommendations = json.loads(result_text)
+            except json.JSONDecodeError as parse_error:
+                print(f"❌ JSON parsing failed: {parse_error}")
+                print(f"   Error at position: {parse_error.pos if hasattr(parse_error, 'pos') else 'unknown'}")
+                print(f"   Text around error: {result_text[max(0, parse_error.pos-50):parse_error.pos+50] if hasattr(parse_error, 'pos') else 'N/A'}")
+                print(f"   Full response (first 1500 chars): {original_text[:1500]}")
+                return []
+            
+            # Validate recommendations structure
+            if not isinstance(recommendations, list):
+                print(f"⚠️  WARNING: LLM returned non-list type: {type(recommendations)}")
+                if isinstance(recommendations, dict):
+                    print(f"   Converting dict to list...")
+                    recommendations = [recommendations]
+                else:
+                    print(f"   Cannot convert {type(recommendations)} to list, returning empty")
+                    recommendations = []
+            
             print(f"✅ Parsed {len(recommendations)} recommendations from LLM")
+            
+            if len(recommendations) == 0:
+                print(f"⚠️  ⚠️  ⚠️  CRITICAL: LLM returned empty recommendations array!")
+                print(f"   Original response length: {len(original_text)}")
+                print(f"   Parsed text length: {len(result_text)}")
+                print(f"   Full original response:")
+                print(f"   {'='*80}")
+                print(f"   {original_text}")
+                print(f"   {'='*80}")
+            else:
+                # Validate each recommendation has required fields
+                valid_recommendations = []
+                for i, rec in enumerate(recommendations):
+                    if not isinstance(rec, dict):
+                        print(f"   ⚠️  Recommendation {i} is not a dict: {type(rec)}")
+                        continue
+                    required_fields = ['priority', 'title', 'description']
+                    missing = [f for f in required_fields if f not in rec]
+                    if missing:
+                        print(f"   ⚠️  Recommendation {i} missing fields: {missing}")
+                        continue
+                    valid_recommendations.append(rec)
+                
+                if len(valid_recommendations) < len(recommendations):
+                    print(f"   ⚠️  Filtered {len(recommendations) - len(valid_recommendations)} invalid recommendations")
+                recommendations = valid_recommendations
+            
             return recommendations
         
         except json.JSONDecodeError as json_error:
             print(f"❌ JSON parsing error for recommendations: {json_error}")
-            print(f"   Response text: {result_text[:500] if 'result_text' in locals() else 'N/A'}")
+            print(f"   Error details: {str(json_error)}")
+            if 'result_text' in locals():
+                print(f"   Response text (first 1000 chars): {result_text[:1000]}")
+            if 'original_text' in locals():
+                print(f"   Original response (first 1500 chars): {original_text[:1500]}")
             import traceback
             traceback.print_exc()
             return []
         except Exception as e:
-            print(f"❌ Error generating recommendations: {e}")
+            print(f"❌ Error generating recommendations: {type(e).__name__}: {e}")
+            print(f"   Error details: {str(e)}")
+            if 'result_text' in locals():
+                print(f"   Response text (first 1000 chars): {result_text[:1000] if 'result_text' in locals() else 'N/A'}")
+            if 'original_text' in locals():
+                print(f"   Original response (first 1500 chars): {original_text[:1500] if 'original_text' in locals() else 'N/A'}")
             import traceback
             traceback.print_exc()
             return []
@@ -720,14 +977,16 @@ Focus on PRACTICAL actions that will make a real difference.
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
             
             cursor = self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cursor.execute("""
+            # Use f-string for embedding to avoid parameter binding issues with pgvector
+            # Note: %% escapes % in f-strings for LIKE clauses
+            cursor.execute(f"""
                 SELECT chunk_text, section_reference
                 FROM tax_laws
                 WHERE jurisdiction = %s
-                AND (chunk_text ILIKE '%deadline%' OR chunk_text ILIKE '%due date%')
-                ORDER BY embedding <=> %s::vector
+                AND (chunk_text ILIKE '%%deadline%%' OR chunk_text ILIKE '%%due date%%')
+                ORDER BY embedding <=> '{embedding_str}'::vector
                 LIMIT 3
-            """, (jurisdiction, embedding_str))
+            """, (jurisdiction,))
             
             results = cursor.fetchall()
             cursor.close()
@@ -777,24 +1036,75 @@ Return JSON array with specific dates:
 """
         
         try:
-            response = self.model.generate_content(prompt)
-            result_text = response.text
+            # Try to generate content, with fallback if model not available
+            try:
+                response = self.model.generate_content(prompt)
+                result_text = response.text
+            except Exception as model_error:
+                error_str = str(model_error)
+                if "404" in error_str or "not found" in error_str.lower() or "not supported" in error_str.lower():
+                    print(f"⚠️  Model not available, trying gemini-2.5-flash fallback...")
+                    try:
+                        fallback_model = genai.GenerativeModel('gemini-2.5-flash')
+                        response = fallback_model.generate_content(prompt)
+                        result_text = response.text
+                    except Exception as e2:
+                        try:
+                            fallback_model = genai.GenerativeModel('gemini-2.0-flash-001')
+                            response = fallback_model.generate_content(prompt)
+                            result_text = response.text
+                        except Exception as e3:
+                            fallback_model = genai.GenerativeModel('gemini-flash-latest')
+                            response = fallback_model.generate_content(prompt)
+                            result_text = response.text
+                else:
+                    raise
             
+            # Save original for debugging
+            original_text = result_text
+            
+            # Extract JSON - improved parsing
             if '```json' in result_text:
                 parts = result_text.split('```json')
                 if len(parts) > 1:
                     json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
                     result_text = json_part
-                else:
-                    # Try regular ``` code blocks
-                    parts = result_text.split('```')
-                    if len(parts) > 1:
-                        result_text = parts[1]
+            elif '```' in result_text:
+                parts = result_text.split('```')
+                if len(parts) > 1:
+                    result_text = parts[1]
             
-            return json.loads(result_text.strip())
+            # Clean up the JSON string
+            result_text = result_text.strip()
+            result_text = result_text.strip(' \n\r\t')
+            
+            # Try to find JSON array in the text if it's not at the start
+            if not result_text.startswith('['):
+                import re
+                array_match = re.search(r'\[.*\]', result_text, re.DOTALL)
+                if array_match:
+                    result_text = array_match.group(0)
+            
+            try:
+                deadlines = json.loads(result_text)
+            except json.JSONDecodeError as parse_error:
+                print(f"❌ JSON parsing error for deadlines: {parse_error}")
+                print(f"   Full response (first 1500 chars): {original_text[:1500]}")
+                return []
+            
+            # Validate structure
+            if not isinstance(deadlines, list):
+                if isinstance(deadlines, dict):
+                    deadlines = [deadlines]
+                else:
+                    return []
+            
+            return deadlines
         
         except Exception as e:
-            print(f"❌ Error extracting deadlines: {e}")
+            print(f"❌ Error extracting deadlines: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     async def _store_planning_scenario(
@@ -940,7 +1250,7 @@ Return JSON array with specific dates:
                 except Exception as e:
                     print(f"⚠️ Error storing recommendation: {e}, rec: {rec}")
                     continue
-            
+        
             # Commit the transaction
             print(f"💾 Committing transaction for scenario {scenario_id}...")
             try:

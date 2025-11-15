@@ -778,18 +778,18 @@ Keep it practical and action-oriented. Focus on what matters for preparing accur
             # Store main comparison
             print(f"💾 Storing comparison {comparison_id} with {len(differences)} differences...")
             cursor.execute("""
-                INSERT INTO jurisdiction_comparisons (
-                    comparison_id, base_jurisdiction, target_jurisdiction,
-                    comparison_scope, tax_year, requested_by, comparison_results
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (
-                comparison_id,
-                base_jurisdiction,
-                target_jurisdiction,
-                scope,
-                tax_year,
-                requested_by,
-                psycopg2.extras.Json({'differences': differences})
+            INSERT INTO jurisdiction_comparisons (
+                comparison_id, base_jurisdiction, target_jurisdiction,
+                comparison_scope, tax_year, requested_by, comparison_results
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            comparison_id,
+            base_jurisdiction,
+            target_jurisdiction,
+            scope,
+            tax_year,
+            requested_by,
+            psycopg2.extras.Json({'differences': differences})
             ))
             
             # Store individual differences

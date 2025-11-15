@@ -495,7 +495,32 @@ console.log(`Findings: ${research.findings.length} jurisdictions`);
 ### 1. Create Planning Scenario
 **Endpoint**: `POST /api/v1/workflow3/scenario`
 
+**Description**: Creates a comprehensive multi-jurisdiction tax planning scenario that analyzes tax treaties, calculates tax exposures, generates optimization recommendations, identifies reporting requirements, and creates a compliance timeline.
+
 **Request**: JSON body
+
+**Request Parameters**:
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `client_id` | string | Yes | - | Unique identifier for the client (e.g., "CLIENT-001") |
+| `client_name` | string | Yes | - | Full name of the client |
+| `scenario_name` | string | Yes | - | Description of the planning scenario |
+| `jurisdictions_involved` | array[string] | Yes | - | List of jurisdictions where client has income/operations (e.g., ["US-NY", "EU-DE", "IN-MH"]) |
+| `income_sources` | array[object] | Yes | - | Array of income source objects (see structure below) |
+| `objectives` | array[string] | Yes | - | Client's optimization objectives (e.g., ["minimize_tax", "avoid_double_taxation", "compliance"]) |
+| `tax_year` | integer | No | Current year | Tax year for planning (e.g., 2024) |
+
+**Income Source Object Structure**:
+```json
+{
+  "type": "employment",              // Type: employment, rental_income, business_income, investment, freelance, pension
+  "jurisdiction": "US-NY",           // Where this income is earned
+  "amount_range": "100000-150000",   // Estimated income range (string format)
+  "description": "Tech company salary"  // Brief description
+}
+```
+
+**Request Example**:
 ```json
 {
   "client_id": "CLIENT-001",
@@ -513,7 +538,7 @@ console.log(`Findings: ${research.findings.length} jurisdictions`);
       "type": "rental_income",
       "jurisdiction": "EU-DE",
       "amount_range": "30000-40000",
-      "description": "Berlin apartment"
+      "description": "Berlin apartment rental"
     }
   ],
   "objectives": ["minimize_tax", "avoid_double_taxation", "compliance"],
@@ -524,84 +549,176 @@ console.log(`Findings: ${research.findings.length} jurisdictions`);
 **Response** (200 OK):
 ```json
 {
-  "scenario_id": "PLAN-6F031A60",
-  "client_id": "CLIENT-001",
+  "scenario_id": "PLAN-03B05F76",
   "client_name": "John Doe",
   "scenario_name": "Remote worker with EU rental income",
-  "jurisdictions_involved": ["US-NY", "EU-DE"],
+  "jurisdictions": ["US-NY", "EU-DE"],
   "tax_year": 2024,
-  "status": "completed",
+  "created_at": "2025-11-15T03:38:36.476069",
+  "treaty_benefits_available": 1,
+  "total_jurisdictions_with_exposure": 2,
+  "high_priority_actions": 2,
+  "estimated_total_exposure_min": 28300,
+  "estimated_total_exposure_max": 43780,
   "analysis": {
-    "summary": "Multi-jurisdiction tax analysis for remote worker with rental income",
-    "estimated_total_exposure_min": 25000,
-    "estimated_total_exposure_max": 35000,
-    "high_priority_actions": 3,
-    "treaty_analysis": [
+    "treaties": [
       {
-        "treaty": "US-Germany Tax Treaty",
-        "relevance": "high",
-        "key_provisions": "Prevents double taxation on employment income",
-        "impact": "US-NY employment income may be exempt from German tax"
+        "countries": ["US-NY", "EU-DE"],
+        "treaty_exists": false,
+        "implication": "No tax treaty - potential double taxation risk"
       }
     ],
-    "tax_exposures": [
+    "exposures": [
       {
         "jurisdiction": "US-NY",
-        "exposure_type": "state_income_tax",
-        "estimated_amount_min": 8000,
-        "estimated_amount_max": 12000,
+        "exposure_type": "primary_income",
         "risk_level": "medium",
-        "description": "NY state tax on employment income"
+        "estimated_impact_min": 23100,
+        "estimated_impact_max": 31300,
+        "primary_concerns": [
+          "Significant combined tax burden from Federal, NY State, and NYC taxes",
+          "Worldwide income taxation on all income sources"
+        ],
+        "mitigation_strategies": [
+          "Utilize Foreign Tax Credit (FTC) for foreign taxes paid",
+          "Optimize payroll withholding and pre-tax deductions"
+        ]
       },
       {
         "jurisdiction": "EU-DE",
-        "exposure_type": "rental_income_tax",
-        "estimated_amount_min": 5000,
-        "estimated_amount_max": 8000,
-        "risk_level": "low",
-        "description": "German tax on rental income"
+        "exposure_type": "double_taxation",
+        "risk_level": "high",
+        "estimated_impact_min": 5200,
+        "estimated_impact_max": 12480,
+        "primary_concerns": [
+          "Double taxation of rental income by both jurisdictions",
+          "High Tax Deducted at Source (TDS) requirements"
+        ],
+        "mitigation_strategies": [
+          "Claim foreign tax credit in US return",
+          "Apply for lower TDS certificate in foreign jurisdiction"
+        ]
       }
     ],
-    "planning_recommendations": [
+    "reporting": [],
+    "recommendations": [
+      {
+        "priority": "critical",
+        "recommendation_type": "reporting",
+        "title": "Claim US Foreign Tax Credit (FTC) for Foreign Taxes",
+        "description": "As a US tax resident, claim Foreign Tax Credit on US federal return for income taxes paid to foreign country. This credit directly offsets US tax liability on foreign-source income.",
+        "expected_benefit": "Direct reduction of US federal income tax liability, effectively eliminating or significantly reducing double taxation",
+        "implementation_steps": [
+          "Maintain meticulous records of all foreign rental income and taxes paid",
+          "Calculate US taxable income from foreign sources",
+          "Complete and file Form 1116 with annual US Federal income tax return",
+          "Consult with tax professional specializing in international taxation"
+        ],
+        "risks_and_considerations": [
+          "Incorrect calculation can lead to IRS audit and penalties",
+          "FTC is limited to US tax on foreign source income",
+          "Proper documentation is crucial for substantiating the credit claim"
+        ],
+        "timeline": "Annually, when preparing US Federal income tax returns (generally by April 15th)"
+      },
       {
         "priority": "high",
-        "category": "treaty_benefits",
-        "recommendation": "Claim US-Germany treaty benefits to avoid double taxation",
-        "estimated_savings": "5000-8000",
-        "action_items": [
-          "File Form 8833 with US return",
-          "Obtain German tax residency certificate"
-        ]
-      },
-      {
-        "priority": "medium",
-        "category": "deductions",
-        "recommendation": "Maximize foreign tax credit for German rental income tax",
-        "estimated_savings": "2000-3000",
-        "action_items": [
-          "Document all German tax payments",
-          "Calculate foreign tax credit on Form 1116"
-        ]
+        "recommendation_type": "timing",
+        "title": "Schedule US Quarterly Estimated Tax Payments",
+        "description": "Make quarterly estimated tax payments to IRS and potentially to NY State/NYC to cover US tax liability on foreign rental income and any potential shortfall from employment income withholding.",
+        "expected_benefit": "Avoidance of costly underpayment penalties and improved cash flow management",
+        "implementation_steps": [
+          "Estimate total US federal, NY State, and NYC tax liability for the year",
+          "Subtract expected withholding from US employment income",
+          "Calculate remaining tax liability to be paid via estimated taxes",
+          "Divide into four equal quarterly payments",
+          "Make timely payments using Form 1040-ES"
+        ],
+        "timeline": "Immediately for current tax year, with payments due quarterly"
       }
     ],
-    "compliance_timeline": [
-      {
-        "jurisdiction": "US-NY",
-        "deadline": "2025-04-15",
-        "form": "IT-201",
-        "description": "NY State income tax return"
-      },
-      {
-        "jurisdiction": "EU-DE",
-        "deadline": "2025-05-31",
-        "form": "ESt 1",
-        "description": "German income tax return"
-      }
-    ]
-  },
-  "created_at": "2024-11-15T00:13:55"
+    "timeline": []
+  }
 }
 ```
+
+**Response Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `scenario_id` | string | Unique scenario identifier (format: `PLAN-XXXXXXXX`) |
+| `client_name` | string | Client's full name |
+| `scenario_name` | string | Description of the scenario |
+| `jurisdictions` | array[string] | List of jurisdictions involved |
+| `tax_year` | integer | Tax year for planning |
+| `created_at` | string | ISO timestamp of scenario creation |
+| `treaty_benefits_available` | integer | Number of applicable tax treaties found |
+| `total_jurisdictions_with_exposure` | integer | Number of jurisdictions with calculated tax exposure |
+| `high_priority_actions` | integer | Number of critical/high priority recommendations |
+| `estimated_total_exposure_min` | number | Minimum estimated total tax exposure across all jurisdictions |
+| `estimated_total_exposure_max` | number | Maximum estimated total tax exposure across all jurisdictions |
+| `analysis.treaties` | array[object] | Tax treaty analysis results (see structure below) |
+| `analysis.exposures` | array[object] | Tax exposure calculations per jurisdiction (see structure below) |
+| `analysis.reporting` | array[object] | Reporting requirements (may be empty if no data found) |
+| `analysis.recommendations` | array[object] | Optimization recommendations (see structure below) |
+| `analysis.timeline` | array[object] | Compliance timeline with deadlines (may be empty if no data found) |
+
+**Treaty Analysis Object**:
+```json
+{
+  "countries": ["US-NY", "EU-DE"],           // Jurisdiction pair
+  "treaty_exists": false,                    // Whether a tax treaty exists
+  "treaty_name": "US-Germany Tax Treaty",    // Name of treaty (if exists)
+  "effective_date": "1989-01-01",            // Treaty effective date (if exists)
+  "key_provisions": "...",                    // Key treaty provisions (if exists)
+  "benefits": ["Reduced withholding rates"],  // List of treaty benefits (if exists)
+  "implication": "No tax treaty - potential double taxation risk"  // Implication for client
+}
+```
+
+**Tax Exposure Object**:
+```json
+{
+  "jurisdiction": "US-NY",                    // Jurisdiction code
+  "exposure_type": "primary_income",          // Type: primary_income, foreign_income, double_taxation
+  "risk_level": "medium",                     // Risk level: high, medium, low
+  "estimated_impact_min": 23100,              // Minimum estimated tax impact
+  "estimated_impact_max": 31300,               // Maximum estimated tax impact
+  "primary_concerns": [                       // Array of primary tax concerns
+    "Significant combined tax burden...",
+    "Worldwide income taxation..."
+  ],
+  "mitigation_strategies": [                  // Array of mitigation strategies
+    "Utilize Foreign Tax Credit (FTC)...",
+    "Optimize payroll withholding..."
+  ]
+}
+```
+
+**Recommendation Object**:
+```json
+{
+  "priority": "critical",                     // Priority: critical, high, medium
+  "recommendation_type": "reporting",         // Type: structure, timing, documentation, treaty_benefit, reporting, compliance
+  "title": "Claim US Foreign Tax Credit...",  // Short title
+  "description": "Detailed explanation...",   // Full description
+  "expected_benefit": "Direct reduction...",  // What client gains
+  "implementation_steps": [                   // Array of actionable steps
+    "Maintain meticulous records...",
+    "Calculate US taxable income..."
+  ],
+  "risks_and_considerations": [               // Array of risks/considerations
+    "Incorrect calculation can lead to audit...",
+    "FTC is limited to US tax on foreign source income"
+  ],
+  "timeline": "Annually, when preparing..."   // When to implement
+}
+```
+
+**Notes**:
+- Processing time: 30-60 seconds (multiple LLM calls and database queries)
+- The `analysis.reporting` and `analysis.timeline` arrays may be empty if no relevant data is found in ingested tax laws
+- All monetary values are in the currency of the respective jurisdiction
+- Recommendations are prioritized: `critical` > `high` > `medium`
 
 **Example cURL**:
 ```bash
@@ -618,30 +735,81 @@ curl -X POST "http://localhost:8001/api/v1/workflow3/scenario" \
         "jurisdiction": "US-NY",
         "amount_range": "100000-150000",
         "description": "Tech company salary"
+      },
+      {
+        "type": "rental_income",
+        "jurisdiction": "EU-DE",
+        "amount_range": "30000-40000",
+        "description": "Berlin apartment rental"
       }
     ],
-    "objectives": ["minimize_tax", "avoid_double_taxation"],
+    "objectives": ["minimize_tax", "avoid_double_taxation", "compliance"],
     "tax_year": 2024
   }'
 ```
+
+**Example JavaScript**:
+```javascript
+const response = await fetch('http://localhost:8001/api/v1/workflow3/scenario', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    client_id: 'CLIENT-001',
+    client_name: 'John Doe',
+    scenario_name: 'Remote worker with EU rental income',
+    jurisdictions_involved: ['US-NY', 'EU-DE'],
+    income_sources: [
+      {
+        type: 'employment',
+        jurisdiction: 'US-NY',
+        amount_range: '100000-150000',
+        description: 'Tech company salary'
+      },
+      {
+        type: 'rental_income',
+        jurisdiction: 'EU-DE',
+        amount_range: '30000-40000',
+        description: 'Berlin apartment rental'
+      }
+    ],
+    objectives: ['minimize_tax', 'avoid_double_taxation', 'compliance'],
+    tax_year: 2024
+  })
+});
+const scenario = await response.json();
+console.log(`Scenario ID: ${scenario.scenario_id}`);
+console.log(`Total exposures: ${scenario.total_jurisdictions_with_exposure}`);
+console.log(`Recommendations: ${scenario.analysis.recommendations.length}`);
+```
+
+**Error Responses**:
+- `400 Bad Request`: Invalid request parameters (missing required fields, invalid income source structure)
+- `500 Internal Server Error`: Database error, LLM error, or connection timeout
 
 ---
 
 ### 2. Get Planning Scenario
 **Endpoint**: `GET /api/v1/workflow3/scenario/{scenario_id}`
 
+**Description**: Retrieves a previously created planning scenario with all stored analysis results, exposures, and recommendations from the database.
+
+**Path Parameters**:
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scenario_id` | string | Yes | The scenario ID returned from the create endpoint (format: `PLAN-XXXXXXXX`) |
+
 **Response** (200 OK):
 ```json
 {
   "scenario": {
     "id": 26,
-    "scenario_id": "PLAN-6F031A60",
+    "scenario_id": "PLAN-03B05F76",
     "client_id": "CLIENT-001",
     "scenario_name": "Remote worker with EU rental income",
     "jurisdictions_involved": ["US-NY", "EU-DE"],
     "tax_year": 2024,
-    "scenario_description": "[{\"type\": \"employment\", \"jurisdiction\": \"US-NY\", ...}]",
-    "objectives": ["minimize_tax", "avoid_double_taxation"],
+    "scenario_description": "[{\"type\": \"employment\", \"jurisdiction\": \"US-NY\", \"amount_range\": \"100000-150000\", \"description\": \"Tech company salary\"}]",
+    "objectives": ["minimize_tax", "avoid_double_taxation", "compliance"],
     "constraints": null,
     "analysis_results": {
       "tax_exposures": [],
@@ -650,57 +818,184 @@ curl -X POST "http://localhost:8001/api/v1/workflow3/scenario" \
       "compliance_timeline": [],
       "reporting_requirements": []
     },
-    "created_at": "2024-11-15T00:13:55"
+    "created_at": "2025-11-15T03:38:36.476069"
   },
-  "exposures": [],
-  "recommendations": []
+  "exposures": [
+    {
+      "id": 1,
+      "scenario_id": "PLAN-03B05F76",
+      "jurisdiction": "US-NY",
+      "exposure_type": "primary_income",
+      "risk_level": "medium",
+      "estimated_impact_min": 23100,
+      "estimated_impact_max": 31300,
+      "mitigation_strategies": ["Utilize Foreign Tax Credit...", "Optimize payroll withholding..."]
+    },
+    {
+      "id": 2,
+      "scenario_id": "PLAN-03B05F76",
+      "jurisdiction": "EU-DE",
+      "exposure_type": "double_taxation",
+      "risk_level": "high",
+      "estimated_impact_min": 5200,
+      "estimated_impact_max": 12480,
+      "mitigation_strategies": ["Claim foreign tax credit...", "Apply for lower TDS certificate..."]
+    }
+  ],
+  "recommendations": [
+    {
+      "id": 1,
+      "scenario_id": "PLAN-03B05F76",
+      "recommendation_type": "reporting",
+      "priority": "critical",
+      "title": "Claim US Foreign Tax Credit (FTC) for Foreign Taxes",
+      "description": "As a US tax resident, claim Foreign Tax Credit...",
+      "expected_benefit": "Direct reduction of US federal income tax liability...",
+      "implementation_steps": ["Maintain meticulous records...", "Calculate US taxable income..."],
+      "risks_and_considerations": ["Incorrect calculation can lead to audit...", "FTC is limited..."],
+      "timeline": "Annually, when preparing US Federal income tax returns..."
+    }
+  ]
 }
 ```
 
-**Note**: 
-- The `analysis_results` object contains the full analysis nested inside the scenario
-- The `exposures` and `recommendations` arrays at the root level are populated from the database tables
-- Arrays may be empty if no exposures/recommendations were generated
-- The `scenario_description` field contains a JSON string of income sources
+**Response Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `scenario` | object | Full scenario record from database |
+| `scenario.analysis_results` | object | Nested analysis results (may contain empty arrays) |
+| `exposures` | array[object] | Tax exposures stored in database (populated from `tax_exposures` table) |
+| `recommendations` | array[object] | Recommendations stored in database (populated from `planning_recommendations` table) |
+
+**Notes**:
+- The `scenario.analysis_results` object contains the original analysis data stored when the scenario was created
+- The `exposures` and `recommendations` arrays at the root level are populated from separate database tables and may contain more detailed information
+- Arrays may be empty if no exposures/recommendations were generated or stored
+- The `scenario_description` field contains a JSON string representation of the income sources
 
 **Example cURL**:
 ```bash
-curl "http://localhost:8001/api/v1/workflow3/scenario/PLAN-6F031A60"
+curl "http://localhost:8001/api/v1/workflow3/scenario/PLAN-03B05F76"
 ```
+
+**Example JavaScript**:
+```javascript
+const response = await fetch('http://localhost:8001/api/v1/workflow3/scenario/PLAN-03B05F76');
+const data = await response.json();
+console.log(`Scenario: ${data.scenario.scenario_name}`);
+console.log(`Exposures: ${data.exposures.length}`);
+console.log(`Recommendations: ${data.recommendations.length}`);
+```
+
+**Error Responses**:
+- `404 Not Found`: Scenario with the given ID does not exist
 
 ---
 
 ### 3. Get Recommendations
 **Endpoint**: `GET /api/v1/workflow3/recommendations/{scenario_id}`
 
+**Description**: Retrieves all recommendations for a specific scenario, optionally filtered by priority level.
+
+**Path Parameters**:
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scenario_id` | string | Yes | The scenario ID (format: `PLAN-XXXXXXXX`) |
+
 **Query Parameters**:
-- `priority` (string, optional): Filter by priority ("high", "medium", "low")
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `priority` | string | No | - | Filter by priority: "critical", "high", or "medium" |
 
 **Response** (200 OK):
 ```json
 {
-  "scenario_id": "PLAN-6F031A60",
-  "total_recommendations": 3,
+  "scenario_id": "PLAN-03B05F76",
+  "count": 7,
   "recommendations": [
     {
       "id": 1,
+      "scenario_id": "PLAN-03B05F76",
+      "priority": "critical",
+      "recommendation_type": "reporting",
+      "title": "Claim US Foreign Tax Credit (FTC) for Foreign Taxes",
+      "description": "As a US tax resident, claim Foreign Tax Credit on US federal income tax return for income taxes paid to foreign country...",
+      "expected_benefit": "Direct reduction of US federal income tax liability on foreign rental income...",
+      "implementation_steps": [
+        "Maintain meticulous records of all foreign rental income and taxes paid",
+        "Calculate US taxable income from foreign sources",
+        "Complete and file Form 1116 with annual US Federal income tax return",
+        "Consult with tax professional specializing in international taxation"
+      ],
+      "risks_and_considerations": [
+        "Incorrect calculation can lead to IRS audit and penalties",
+        "FTC is limited to US tax on foreign source income",
+        "Proper documentation is crucial for substantiating the credit claim"
+      ],
+      "timeline": "Annually, when preparing US Federal income tax returns (generally by April 15th)",
+      "created_at": "2025-11-15T03:38:36.476069"
+    },
+    {
+      "id": 2,
+      "scenario_id": "PLAN-03B05F76",
       "priority": "high",
-      "category": "treaty_benefits",
-      "recommendation": "Claim US-Germany treaty benefits to avoid double taxation",
-      "estimated_savings": "5000-8000",
-      "action_items": [
-        "File Form 8833 with US return",
-        "Obtain German tax residency certificate"
-      ]
+      "recommendation_type": "timing",
+      "title": "Schedule US Quarterly Estimated Tax Payments",
+      "description": "Make quarterly estimated tax payments to IRS...",
+      "expected_benefit": "Avoidance of costly underpayment penalties...",
+      "implementation_steps": [
+        "Estimate total US federal, NY State, and NYC tax liability for the year",
+        "Subtract expected withholding from US employment income",
+        "Calculate remaining tax liability to be paid via estimated taxes",
+        "Divide into four equal quarterly payments",
+        "Make timely payments using Form 1040-ES"
+      ],
+      "risks_and_considerations": [
+        "Underestimating income can still lead to penalties",
+        "Overpayment ties up cash that could be invested elsewhere"
+      ],
+      "timeline": "Immediately for current tax year, with payments due quarterly",
+      "created_at": "2025-11-15T03:38:36.476069"
     }
   ]
 }
 ```
 
+**Response Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `scenario_id` | string | The scenario ID |
+| `count` | integer | Total number of recommendations returned (after filtering) |
+| `recommendations` | array[object] | Array of recommendation objects (see structure above) |
+
 **Example cURL**:
 ```bash
-curl "http://localhost:8001/api/v1/workflow3/recommendations/PLAN-6F031A60?priority=high"
+# Get all recommendations
+curl "http://localhost:8001/api/v1/workflow3/recommendations/PLAN-03B05F76"
+
+# Get only critical recommendations
+curl "http://localhost:8001/api/v1/workflow3/recommendations/PLAN-03B05F76?priority=critical"
+
+# Get only high priority recommendations
+curl "http://localhost:8001/api/v1/workflow3/recommendations/PLAN-03B05F76?priority=high"
 ```
+
+**Example JavaScript**:
+```javascript
+// Get all recommendations
+const allResponse = await fetch('http://localhost:8001/api/v1/workflow3/recommendations/PLAN-03B05F76');
+const allRecs = await allResponse.json();
+console.log(`Total recommendations: ${allRecs.count}`);
+
+// Get only critical recommendations
+const criticalResponse = await fetch('http://localhost:8001/api/v1/workflow3/recommendations/PLAN-03B05F76?priority=critical');
+const criticalRecs = await criticalResponse.json();
+console.log(`Critical recommendations: ${criticalRecs.count}`);
+```
+
+**Error Responses**:
+- `404 Not Found`: Scenario with the given ID does not exist
+- `500 Internal Server Error`: Database error
 
 ---
 
@@ -884,6 +1179,6 @@ const scenario = await scenarioResponse.json();
 
 ---
 
-**Last Updated**: November 15, 2024
+**Last Updated**: November 15, 2025
 **API Version**: 1.0.0
 

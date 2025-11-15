@@ -101,7 +101,7 @@ class FormCompletenessChecker:
             # 3. Run all requested checks
             all_issues = []
             check_results = {}
-        
+            
             if 'required_fields' in check_types or 'completeness' in check_types:
                 try:
                     print("📋 Checking required fields...")
@@ -720,16 +720,16 @@ FORMAT: [{{ "field_name": "...", "issue_description": "...", ... }}]
             cursor = self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             # Use embedding_str directly in SQL to avoid parameter binding issues with pgvector
             cursor.execute(f"""
-                SELECT 
-                    id,
-                    chunk_text,
-                    section_reference,
-                    document_title
-                FROM tax_laws
-                WHERE jurisdiction = %s
+            SELECT 
+                id,
+                chunk_text,
+                section_reference,
+                document_title
+            FROM tax_laws
+            WHERE jurisdiction = %s
                 AND law_category LIKE '%%filing%%'
                 ORDER BY embedding <=> '{embedding_str}'::vector
-                LIMIT 5
+            LIMIT 5
             """, (jurisdiction,))
             
             relevant_laws = cursor.fetchall()
