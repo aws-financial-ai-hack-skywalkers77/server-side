@@ -100,6 +100,7 @@ class Database:
                     ALTER TABLE invoices
                     ADD COLUMN IF NOT EXISTS last_compliance_run_at TIMESTAMP,
                     ADD COLUMN IF NOT EXISTS compliance_status VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS risk_assessment_score DECIMAL(10, 4),
                     ADD COLUMN IF NOT EXISTS s3_key VARCHAR(1000);
                 """)
                 
@@ -137,22 +138,36 @@ class Database:
                         id SERIAL PRIMARY KEY,
                         invoice_id INTEGER REFERENCES invoices(id) ON DELETE CASCADE,
                         invoice_number VARCHAR(255),
+                        db_id INTEGER,
                         status VARCHAR(50),
                         violations JSONB,
                         pricing_rules JSONB,
                         llm_metadata JSONB,
+                        risk_assessment_score DECIMAL(10, 4),
                         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         next_run_at TIMESTAMP,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                
+                # Add risk_assessment_score column to existing compliance_reports table if it doesn't exist
+                cur.execute("""
+                    ALTER TABLE compliance_reports
+                    ADD COLUMN IF NOT EXISTS risk_assessment_score DECIMAL(10, 4);
+                """)
+                
+                # Add db_id column to existing compliance_reports table if it doesn't exist
+                cur.execute("""
+                    ALTER TABLE compliance_reports
+                    ADD COLUMN IF NOT EXISTS db_id INTEGER;
+                """)
 
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS compliance_reports_invoice_id_idx
                     ON compliance_reports(invoice_id);
                 """)
-
+                
                 # Create index on vector column for similarity search
                 # Note: IVFFlat index requires at least 10 rows, so we create it but it may not be used until data is inserted
                 cur.execute(f"""
@@ -271,7 +286,7 @@ class Database:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
                     SELECT id, invoice_id, seller_name, seller_address, tax_id,
-                           subtotal_amount, tax_amount, summary, created_at, updated_at
+                           subtotal_amount, tax_amount, summary, s3_key, created_at, updated_at
                     FROM invoices
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s;
@@ -295,7 +310,7 @@ class Database:
         except Exception as e:
             logger.error(f"Error getting invoices count: {e}")
             raise
-
+    
     def insert_invoice_line_items(self, invoice_db_id, line_items):
         """Insert line items for an invoice"""
         self.connect()
@@ -375,21 +390,34 @@ class Database:
         invoice['line_items'] = line_items
         return invoice
 
-    def update_invoice_compliance_metadata(self, invoice_db_id, status):
-        """Update invoice record with compliance run timestamp and status"""
+    def update_invoice_compliance_metadata(self, invoice_db_id, status, risk_assessment_score=None):
+        """Update invoice record with compliance run timestamp, status, and risk assessment score"""
         self.connect()
         try:
             with self.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE invoices
-                    SET last_compliance_run_at = CURRENT_TIMESTAMP,
-                        compliance_status = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s;
-                    """,
-                    (status, invoice_db_id)
-                )
+                if risk_assessment_score is not None:
+                    cur.execute(
+                        """
+                        UPDATE invoices
+                        SET last_compliance_run_at = CURRENT_TIMESTAMP,
+                            compliance_status = %s,
+                            risk_assessment_score = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s;
+                        """,
+                        (status, risk_assessment_score, invoice_db_id)
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE invoices
+                        SET last_compliance_run_at = CURRENT_TIMESTAMP,
+                            compliance_status = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s;
+                        """,
+                        (status, invoice_db_id)
+                    )
                 self.conn.commit()
         except Exception as e:
             logger.error(f"Error updating invoice compliance metadata: {e}")
@@ -409,7 +437,7 @@ class Database:
         else:
             return obj
 
-    def save_compliance_report(self, invoice_db_id, invoice_number, status, violations, pricing_rules, llm_metadata=None, next_run_at=None):
+    def save_compliance_report(self, invoice_db_id, invoice_number, status, violations, pricing_rules, llm_metadata=None, next_run_at=None, risk_assessment_score=None):
         """Persist compliance evaluation results"""
         self.connect()
         try:
@@ -418,13 +446,15 @@ class Database:
                     INSERT INTO compliance_reports (
                         invoice_id,
                         invoice_number,
+                        db_id,
                         status,
                         violations,
                         pricing_rules,
                         llm_metadata,
+                        risk_assessment_score,
                         processed_at,
                         next_run_at
-                    ) VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, %s)
+                    ) VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, CURRENT_TIMESTAMP, %s)
                     RETURNING id, processed_at;
                 """
                 # Convert Decimal to float before JSON serialization
@@ -440,10 +470,12 @@ class Database:
                     (
                         invoice_db_id,
                         invoice_number,
+                        invoice_db_id,  # db_id is the same as invoice_db_id
                         status,
                         violations_json,
                         pricing_rules_json,
                         metadata_json,
+                        risk_assessment_score,
                         next_run_at
                     )
                 )
@@ -461,8 +493,9 @@ class Database:
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, invoice_id, invoice_number, status, violations,
-                           pricing_rules, llm_metadata, processed_at, next_run_at
+                    SELECT id, invoice_id, invoice_number, db_id, status, violations,
+                           pricing_rules, llm_metadata, risk_assessment_score,
+                           processed_at, next_run_at
                     FROM compliance_reports
                     WHERE invoice_id = %s
                     ORDER BY processed_at DESC
@@ -585,7 +618,7 @@ class Database:
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, contract_id, summary, text, created_at, updated_at
+                    SELECT id, contract_id, summary, text, s3_key, created_at, updated_at
                     FROM contracts
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s;
