@@ -2,7 +2,6 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
-from pdf_highlighter import PDFHighlighter
 
 
 class ComplianceEngine:
@@ -23,7 +22,6 @@ class ComplianceEngine:
         self.clause_limit = clause_limit
         self.next_run_interval_hours = next_run_interval_hours
         self.logger = logging.getLogger(__name__)
-        self.pdf_highlighter = PDFHighlighter()
 
     # -------------------------------------------------------------------------
     # Public API
@@ -46,9 +44,7 @@ class ComplianceEngine:
         invoice["line_items"] = line_items
 
         contract_contexts, clause_references = self._retrieve_contract_context(invoice)
-        no_contracts_found = not contract_contexts
-        
-        if no_contracts_found:
+        if not contract_contexts:
             self.logger.warning(
                 "No contract clauses retrieved for invoice '%s'", invoice.get("invoice_id")
             )
@@ -69,6 +65,7 @@ class ComplianceEngine:
 
         report = {
             "invoice_id": invoice.get("invoice_id"),
+            "db_id": invoice.get("id"),  # Database ID of the invoice
             "status": status,
             "processed_at": processed_at,
             "violations": violations,
@@ -95,48 +92,6 @@ class ComplianceEngine:
             status=status,
             risk_assessment_score=risk_assessment_score,
         )
-
-        # Always return an S3 URL - highlighted if contracts found and violations exist, original otherwise
-        s3_url = None
-        try:
-            # Get S3 key for the invoice
-            s3_key = self.db.get_invoice_s3_key(invoice.get("id"))
-            if s3_key:
-                # If no contracts found, return original PDF
-                if no_contracts_found:
-                    s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
-                    self.logger.info(f"No contracts found, returning original PDF S3 URL: {s3_url}")
-                else:
-                    # Contracts found - highlight PDF if violations exist, otherwise return original
-                    s3_url = self.pdf_highlighter.process_invoice_pdf(
-                        s3_key=s3_key,
-                        violations=violations
-                    )
-                    if s3_url:
-                        if violations:
-                            self.logger.info(f"Generated highlighted PDF S3 URL: {s3_url}")
-                        else:
-                            self.logger.info(f"No violations found, returning original PDF S3 URL: {s3_url}")
-                    else:
-                        self.logger.warning("PDF processing returned None, falling back to original")
-                        s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
-            else:
-                self.logger.warning(f"No S3 key found for invoice {invoice.get('id')}, skipping S3 URL generation")
-        except Exception as e:
-            # Don't fail the entire compliance process if PDF processing fails
-            self.logger.error(f"Error generating S3 URL: {e}", exc_info=True)
-            # Try to return original PDF as fallback
-            try:
-                s3_key = self.db.get_invoice_s3_key(invoice.get("id"))
-                if s3_key:
-                    s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
-                    self.logger.info(f"Using original PDF S3 URL as fallback: {s3_url}")
-            except Exception as fallback_error:
-                self.logger.error(f"Failed to get original PDF S3 URL as fallback: {fallback_error}")
-        
-        # Add S3 URL to report (always include if available)
-        if s3_url:
-            report["s3_url"] = s3_url
 
         return report
 
@@ -598,15 +553,15 @@ class ComplianceEngine:
         """
         Calculate risk assessment score for an invoice.
         
-        Formula: (total_invoice_amount - max_invoice_amount_legal) / max_invoice_amount_legal
+        Formula: overbilling_amount / (total_invoice_amount - overbilling_amount)
         
         Where:
         - total_invoice_amount: The total amount of the invoice (subtotal + tax)
-        - max_invoice_amount_legal: The maximum amount that would have been payable
-          if no contract rules were broken (cannot exceed total_invoice_amount)
+        - overbilling_amount: Sum of all violation differences (actual_price - expected_price)
         
         Returns:
-        - Risk assessment score rounded to 4 decimal places (non-negative)
+        - Risk assessment score rounded to 4 decimal places (between 0 and 1)
+        - 0.0 if no violations detected
         - None if calculation cannot be performed
         """
         try:
@@ -639,59 +594,51 @@ class ComplianceEngine:
                 )
                 return None
             
-            # Build a map of violations by line_id for quick lookup
-            violations_by_line_id = {}
+            # Calculate overbilling_amount: sum of all violation differences
+            overbilling_amount = 0.0
             for violation in violations:
-                line_id = violation.get("line_id")
-                if line_id:
-                    violations_by_line_id[line_id] = violation
+                difference = violation.get("difference")
+                if difference is not None:
+                    try:
+                        diff_value = float(difference)
+                        if diff_value > 0:  # Only count positive differences (overbilling)
+                            overbilling_amount += diff_value
+                    except (TypeError, ValueError):
+                        # Skip invalid difference values
+                        continue
             
-            # Calculate max_invoice_amount_legal
-            # For each line item:
-            # - If there's a violation, use expected_price
-            # - If no violation, use actual total_price
-            max_invoice_amount_legal = 0.0
+            # If no overbilling detected, score is 0
+            if overbilling_amount <= 0:
+                return 0.0
             
-            for item in line_items:
-                line_id = item.get("line_id")
-                actual_total_price = self._calculate_actual_price(item)
-                
-                if line_id and line_id in violations_by_line_id:
-                    # Use expected_price from violation
-                    violation = violations_by_line_id[line_id]
-                    expected_price = violation.get("expected_price")
-                    if expected_price is not None:
-                        try:
-                            max_invoice_amount_legal += float(expected_price)
-                        except (TypeError, ValueError):
-                            # Fallback to actual price if expected_price is invalid
-                            if actual_total_price is not None:
-                                max_invoice_amount_legal += actual_total_price
-                    elif actual_total_price is not None:
-                        max_invoice_amount_legal += actual_total_price
-                else:
-                    # No violation, use actual price
-                    if actual_total_price is not None:
-                        max_invoice_amount_legal += actual_total_price
-            
-            # Ensure max_invoice_amount_legal doesn't exceed total_invoice_amount
-            if max_invoice_amount_legal > total_invoice_amount:
-                max_invoice_amount_legal = total_invoice_amount
-            
-            if max_invoice_amount_legal <= 0:
+            # Check for division by zero: if overbilling equals total, return 1.0
+            if overbilling_amount >= total_invoice_amount:
                 self.logger.warning(
-                    "Cannot calculate risk score: max_invoice_amount_legal is %s",
-                    max_invoice_amount_legal
+                    "Overbilling amount (%s) exceeds or equals total invoice amount (%s). Returning score 1.0",
+                    overbilling_amount,
+                    total_invoice_amount
+                )
+                return 1.0
+            
+            # Calculate risk assessment score
+            # Formula: overbilling_amount / (total_invoice_amount - overbilling_amount)
+            denominator = total_invoice_amount - overbilling_amount
+            if denominator <= 0:
+                self.logger.warning(
+                    "Cannot calculate risk score: denominator is %s (total: %s, overbilling: %s)",
+                    denominator,
+                    total_invoice_amount,
+                    overbilling_amount
                 )
                 return None
             
-            # Calculate risk assessment score
-            # Formula: (total_invoice_amount - max_invoice_amount_legal) / max_invoice_amount_legal
-            score = (total_invoice_amount - max_invoice_amount_legal) / max_invoice_amount_legal
+            score = overbilling_amount / denominator
             
-            # Ensure score is non-negative (round negative values to 0)
+            # Ensure score is between 0 and 1
             if score < 0:
                 score = 0.0
+            elif score > 1:
+                score = 1.0
             
             # Round to 4 decimal places
             return round(score, 4)

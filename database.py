@@ -55,6 +55,7 @@ class Database:
                         subtotal_amount DECIMAL(15, 2),
                         tax_amount DECIMAL(15, 2),
                         summary TEXT,
+                        s3_key VARCHAR(1000),
                         vector vector({vector_dim}),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -75,6 +76,7 @@ class Database:
                         text TEXT,
                         summary TEXT,
                         clauses JSONB,
+                        s3_key VARCHAR(1000),
                         vector vector({vector_dim}),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -93,12 +95,19 @@ class Database:
                     ADD COLUMN IF NOT EXISTS clauses JSONB;
                 """)
                 
-                # Ensure invoices table has compliance tracking columns
+                # Ensure invoices table has compliance tracking columns and s3_key
                 cur.execute("""
                     ALTER TABLE invoices
                     ADD COLUMN IF NOT EXISTS last_compliance_run_at TIMESTAMP,
                     ADD COLUMN IF NOT EXISTS compliance_status VARCHAR(50),
-                    ADD COLUMN IF NOT EXISTS risk_assessment_score DECIMAL(10, 4);
+                    ADD COLUMN IF NOT EXISTS risk_assessment_score DECIMAL(10, 4),
+                    ADD COLUMN IF NOT EXISTS s3_key VARCHAR(1000);
+                """)
+                
+                # Ensure contracts table has s3_key column
+                cur.execute("""
+                    ALTER TABLE contracts
+                    ADD COLUMN IF NOT EXISTS s3_key VARCHAR(1000);
                 """)
 
                 # Create invoice line items table
@@ -129,6 +138,7 @@ class Database:
                         id SERIAL PRIMARY KEY,
                         invoice_id INTEGER REFERENCES invoices(id) ON DELETE CASCADE,
                         invoice_number VARCHAR(255),
+                        db_id INTEGER,
                         status VARCHAR(50),
                         violations JSONB,
                         pricing_rules JSONB,
@@ -146,12 +156,18 @@ class Database:
                     ALTER TABLE compliance_reports
                     ADD COLUMN IF NOT EXISTS risk_assessment_score DECIMAL(10, 4);
                 """)
+                
+                # Add db_id column to existing compliance_reports table if it doesn't exist
+                cur.execute("""
+                    ALTER TABLE compliance_reports
+                    ADD COLUMN IF NOT EXISTS db_id INTEGER;
+                """)
 
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS compliance_reports_invoice_id_idx
                     ON compliance_reports(invoice_id);
                 """)
-
+                
                 # Create index on vector column for similarity search
                 # Note: IVFFlat index requires at least 10 rows, so we create it but it may not be used until data is inserted
                 cur.execute(f"""
@@ -173,7 +189,7 @@ class Database:
             self.conn.rollback()
             raise
     
-    def insert_invoice(self, metadata, vector):
+    def insert_invoice(self, metadata, vector, s3_key=None):
         """Insert invoice metadata and vector into database"""
         self.connect()  # Ensure connection is established
         try:
@@ -184,10 +200,10 @@ class Database:
                 insert_query = """
                     INSERT INTO invoices (
                         invoice_id, seller_name, seller_address, tax_id,
-                        subtotal_amount, tax_amount, summary, vector
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector)
+                        subtotal_amount, tax_amount, summary, s3_key, vector
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
                     RETURNING id, invoice_id, seller_name, seller_address, 
-                              tax_id, subtotal_amount, tax_amount, summary, created_at;
+                              tax_id, subtotal_amount, tax_amount, summary, s3_key, created_at;
                 """
                 cur.execute(insert_query, (
                     metadata.get('invoice_id'),
@@ -197,6 +213,7 @@ class Database:
                     metadata.get('subtotal_amount'),
                     metadata.get('tax_amount'),
                     metadata.get('summary'),
+                    s3_key,
                     vector_str
                 ))
                 result = cur.fetchone()
@@ -235,7 +252,7 @@ class Database:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
                     SELECT id, invoice_id, seller_name, seller_address, tax_id,
-                           subtotal_amount, tax_amount, summary, created_at, updated_at
+                           subtotal_amount, tax_amount, summary, s3_key, created_at, updated_at
                     FROM invoices
                     WHERE id = %s
                     LIMIT 1;
@@ -249,6 +266,19 @@ class Database:
             logger.error(f"Error retrieving invoice by ID: {e}")
             raise
     
+    def get_invoice_s3_key(self, db_id):
+        """Get S3 key for an invoice by database ID"""
+        self.connect()
+        try:
+            with self.conn.cursor() as cur:
+                query = "SELECT s3_key FROM invoices WHERE id = %s LIMIT 1;"
+                cur.execute(query, (db_id,))
+                result = cur.fetchone()
+                return result[0] if result and result[0] else None
+        except Exception as e:
+            logger.error(f"Error retrieving invoice S3 key: {e}")
+            raise
+    
     def get_all_invoices(self, limit=100, offset=0):
         """Get all invoices with pagination"""
         self.connect()
@@ -256,7 +286,7 @@ class Database:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
                     SELECT id, invoice_id, seller_name, seller_address, tax_id,
-                           subtotal_amount, tax_amount, summary, created_at, updated_at
+                           subtotal_amount, tax_amount, summary, s3_key, created_at, updated_at
                     FROM invoices
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s;
@@ -280,7 +310,7 @@ class Database:
         except Exception as e:
             logger.error(f"Error getting invoices count: {e}")
             raise
-
+    
     def insert_invoice_line_items(self, invoice_db_id, line_items):
         """Insert line items for an invoice"""
         self.connect()
@@ -416,6 +446,7 @@ class Database:
                     INSERT INTO compliance_reports (
                         invoice_id,
                         invoice_number,
+                        db_id,
                         status,
                         violations,
                         pricing_rules,
@@ -423,7 +454,7 @@ class Database:
                         risk_assessment_score,
                         processed_at,
                         next_run_at
-                    ) VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, CURRENT_TIMESTAMP, %s)
+                    ) VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, CURRENT_TIMESTAMP, %s)
                     RETURNING id, processed_at;
                 """
                 # Convert Decimal to float before JSON serialization
@@ -439,6 +470,7 @@ class Database:
                     (
                         invoice_db_id,
                         invoice_number,
+                        invoice_db_id,  # db_id is the same as invoice_db_id
                         status,
                         violations_json,
                         pricing_rules_json,
@@ -461,7 +493,7 @@ class Database:
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, invoice_id, invoice_number, status, violations,
+                    SELECT id, invoice_id, invoice_number, db_id, status, violations,
                            pricing_rules, llm_metadata, risk_assessment_score,
                            processed_at, next_run_at
                     FROM compliance_reports
@@ -505,7 +537,7 @@ class Database:
             logger.error(f"Error retrieving invoices pending compliance: {e}")
             raise
     
-    def insert_contract(self, metadata, vector):
+    def insert_contract(self, metadata, vector, s3_key=None):
         """Insert contract metadata and vector into database"""
         self.connect()  # Ensure connection is established
         try:
@@ -520,10 +552,10 @@ class Database:
                 insert_query = """
                     INSERT INTO contracts (
                         contract_id, vendor_name, effective_date, start_date, end_date,
-                        pricing_sections, service_types, summary, text, clauses, vector
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s::vector)
+                        pricing_sections, service_types, summary, text, clauses, s3_key, vector
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s::vector)
                     RETURNING id, contract_id, vendor_name, effective_date, start_date, end_date,
-                              pricing_sections, service_types, summary, text, clauses, created_at;
+                              pricing_sections, service_types, summary, text, clauses, s3_key, created_at;
                 """
                 cur.execute(insert_query, (
                     metadata.get('contract_id'),
@@ -536,6 +568,7 @@ class Database:
                     metadata.get('summary'),
                     metadata.get('text'),
                     clauses_json,
+                    s3_key,
                     vector_str
                 ))
                 result = cur.fetchone()
@@ -552,7 +585,7 @@ class Database:
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, contract_id, summary, text, created_at, updated_at
+                    SELECT id, contract_id, summary, text, s3_key, created_at, updated_at
                     FROM contracts
                     WHERE id = %s
                     LIMIT 1;
@@ -566,13 +599,26 @@ class Database:
             logger.error(f"Error retrieving contract by contract_id: {e}")
             raise
     
+    def get_contract_s3_key(self, db_id):
+        """Get S3 key for a contract by database ID"""
+        self.connect()
+        try:
+            with self.conn.cursor() as cur:
+                query = "SELECT s3_key FROM contracts WHERE id = %s LIMIT 1;"
+                cur.execute(query, (db_id,))
+                result = cur.fetchone()
+                return result[0] if result and result[0] else None
+        except Exception as e:
+            logger.error(f"Error retrieving contract S3 key: {e}")
+            raise
+    
     def get_all_contracts(self, limit=100, offset=0):
         """Get all contracts with pagination"""
         self.connect()
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, contract_id, summary, text, created_at, updated_at
+                    SELECT id, contract_id, summary, text, s3_key, created_at, updated_at
                     FROM contracts
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s;
