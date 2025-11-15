@@ -20,7 +20,7 @@ CREATE TABLE tax_laws (
     chunk_index INTEGER,
     section_reference VARCHAR(255),            -- e.g., 'Section 179', '§26 EStG'
     metadata JSONB,
-    embedding vector(768),
+    embedding vector(384),  -- Changed to 384 for local model (all-MiniLM-L6-v2). Use 768 for OpenAI/Gemini.
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -44,7 +44,7 @@ CREATE TABLE form_templates (
     required_fields JSONB,                     -- Array of required field definitions
     calculation_rules JSONB,                   -- Validation and calculation formulas
     dependencies JSONB,                        -- What other forms/schedules are needed
-    embedding vector(768),
+    embedding vector(384),  -- Changed to 384 for local model (all-MiniLM-L6-v2). Use 768 for OpenAI/Gemini.
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -64,7 +64,7 @@ CREATE TABLE tax_treaties (
     treaty_text TEXT,
     key_provisions JSONB,                      -- Structured data about rates, exemptions
     article_chunks JSONB,                      -- Array of treaty articles with embeddings
-    embedding vector(768),
+    embedding vector(384),  -- Changed to 384 for local model (all-MiniLM-L6-v2). Use 768 for OpenAI/Gemini.
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -105,7 +105,7 @@ CREATE TABLE tax_documents (
     extracted_data JSONB,                      -- Parsed form data from Landing AI
     document_type VARCHAR(100),                -- 'draft', 'filed', 'amended'
     status VARCHAR(50) DEFAULT 'uploaded',     -- 'uploaded', 'processing', 'checked', 'filed'
-    embedding vector(768),
+    embedding vector(384),  -- Changed to 384 for local model (all-MiniLM-L6-v2). Use 768 for OpenAI/Gemini.
     uploaded_at TIMESTAMP DEFAULT NOW(),
     processed_at TIMESTAMP
 );
@@ -245,7 +245,7 @@ CREATE TABLE query_logs (
     user_id VARCHAR(100),
     workflow VARCHAR(50),                      -- 'completeness', 'comparison', 'planning'
     query_text TEXT,
-    query_embedding vector(768),
+    query_embedding vector(384),  -- Changed to 384 for local model
     jurisdictions VARCHAR(100)[],
     results_count INTEGER,
     response_time_ms INTEGER,
@@ -297,7 +297,7 @@ WHERE cc.severity = 'critical' AND cc.is_resolved = FALSE;
 
 -- Function to search laws by semantic similarity
 CREATE OR REPLACE FUNCTION search_laws_by_similarity(
-    query_embedding vector(768),
+    query_embedding vector(384),  -- Changed to 384 for local model
     target_jurisdiction VARCHAR(100),
     result_limit INTEGER DEFAULT 10
 )

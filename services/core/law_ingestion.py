@@ -68,56 +68,156 @@ class LawIngestionService:
             
             # Process and store each chunk
             stored_chunks = []
-            cursor = self.db.cursor()
+            failed_chunks = []
+            
+            logger.info(f"Processing {len(text_chunks)} chunks with rate limiting...")
             
             for idx, chunk in enumerate(text_chunks):
                 chunk_text = chunk['text']
                 section_ref = chunk.get('section_reference', f"Section {idx + 1}")
                 
-                # Generate embedding
-                embedding = await self.vectorizer.embed_document(chunk_text)
+                # Use a new cursor for each chunk to avoid transaction issues
+                # Ensure cursor uses the same factory as connection (RealDictCursor)
+                cursor = self.db.cursor()
                 
-                # Convert to pgvector format
-                embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-                
-                # Store in database
-                cursor.execute("""
-                    INSERT INTO tax_laws (
-                        jurisdiction, law_category, document_title,
-                        document_source, effective_date, chunk_text,
-                        chunk_index, section_reference, embedding
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
-                    RETURNING id
-                """, (
-                    jurisdiction,
-                    law_category,
-                    document_title or f"Tax Law Document",
-                    document_source,
-                    effective_date,
-                    chunk_text,
-                    idx,
-                    section_ref,
-                    embedding_str
-                ))
-                
-                chunk_id = cursor.fetchone()[0]
-                stored_chunks.append({
-                    'id': chunk_id,
-                    'chunk_index': idx,
-                    'section_reference': section_ref
-                })
-            
-            self.db.commit()
-            cursor.close()
+                try:
+                    # Generate embedding (with built-in rate limiting)
+                    embedding = await self.vectorizer.embed_document(chunk_text)
+                    
+                    # Validate embedding
+                    if not embedding:
+                        raise ValueError("Embedding is empty or None")
+                    if not isinstance(embedding, list):
+                        raise ValueError(f"Embedding is not a list: {type(embedding)}")
+                    if len(embedding) == 0:
+                        raise ValueError("Embedding list is empty")
+                    if len(embedding) != 384:
+                        raise ValueError(f"Expected 384 dimensions, got {len(embedding)}")
+                    
+                    # Convert to pgvector format - use numpy array directly if available
+                    try:
+                        import numpy as np
+                        if isinstance(embedding, np.ndarray):
+                            embedding_list = embedding.tolist()
+                        else:
+                            embedding_list = list(embedding)
+                    except:
+                        embedding_list = list(embedding)
+                    
+                    embedding_str = '[' + ','.join(map(str, embedding_list)) + ']'
+                    
+                    # Store in database
+                    try:
+                        cursor.execute("""
+                            INSERT INTO tax_laws (
+                                jurisdiction, law_category, document_title,
+                                document_source, effective_date, chunk_text,
+                                chunk_index, section_reference, embedding
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                            RETURNING id
+                        """, (
+                            jurisdiction,
+                            law_category,
+                            document_title or f"Tax Law Document",
+                            document_source,
+                            effective_date,
+                            chunk_text,
+                            idx,
+                            section_ref,
+                            embedding_str
+                        ))
+                    except Exception as db_error:
+                        raise ValueError(f"Database INSERT failed: {str(db_error)}") from db_error
+                    
+                    result = cursor.fetchone()
+                    if not result:
+                        raise ValueError("No ID returned from INSERT - query may have failed silently")
+                    
+                    # Handle both tuple and dict-like results (RealDictRow)
+                    # RealDictRow supports dict access with 'id' key
+                    try:
+                        # Check if result has 'id' key (for RealDictRow/dict)
+                        if hasattr(result, 'keys') and 'id' in result:
+                            chunk_id = result['id']
+                        elif hasattr(result, '__getitem__'):
+                            # Try dict access first
+                            try:
+                                chunk_id = result['id']
+                            except (KeyError, TypeError):
+                                # Fallback to index access
+                                chunk_id = result[0]
+                        elif isinstance(result, (list, tuple)):
+                            chunk_id = result[0]
+                        else:
+                            raise ValueError(f"Unexpected result type: {type(result)}")
+                    except (KeyError, TypeError, IndexError) as e:
+                        error_details = f"Type: {type(result)}, Value: {result}"
+                        if hasattr(result, 'keys'):
+                            error_details += f", Keys: {list(result.keys())}"
+                        raise ValueError(f"Could not extract ID from result. {error_details}, Error: {e}")
+                    
+                    self.db.commit()  # Commit each chunk individually
+                    cursor.close()
+                    
+                    stored_chunks.append({
+                        'id': chunk_id,
+                        'chunk_index': idx,
+                        'section_reference': section_ref
+                    })
+                    
+                    # Progress logging
+                    if (idx + 1) % 10 == 0:
+                        logger.info(f"Processed {idx + 1}/{len(text_chunks)} chunks...")
+                        
+                except ValueError as e:
+                    # Validation error - stop processing
+                    error_msg = str(e) if str(e) else repr(e)
+                    logger.error(f"Error at chunk {idx + 1}/{len(text_chunks)}: {error_msg}")
+                    failed_chunks.append({
+                        'chunk_index': idx,
+                        'section_reference': section_ref,
+                        'error': error_msg
+                    })
+                    self.db.rollback()
+                    cursor.close()
+                    raise ValueError(
+                        f"Error while processing chunk {idx + 1}/{len(text_chunks)}: {error_msg}. "
+                        f"Successfully ingested {len(stored_chunks)} chunks before error. "
+                    ) from e
+                except Exception as e:
+                    # Other errors - log and continue with next chunk
+                    error_msg = str(e) if str(e) else repr(e)
+                    if not error_msg or error_msg == "0":
+                        error_msg = f"Database error: {type(e).__name__}"
+                    logger.warning(f"Error processing chunk {idx + 1}: {error_msg}", exc_info=True)
+                    failed_chunks.append({
+                        'chunk_index': idx,
+                        'section_reference': section_ref,
+                        'error': error_msg
+                    })
+                    # Rollback and close cursor
+                    try:
+                        self.db.rollback()
+                    except:
+                        pass
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+                    continue
             
             logger.info(f"Successfully ingested {len(stored_chunks)} chunks")
+            if failed_chunks:
+                logger.warning(f"Failed to process {len(failed_chunks)} chunks due to errors")
             
             return {
                 'success': True,
                 'chunks_ingested': len(stored_chunks),
+                'chunks_failed': len(failed_chunks),
                 'jurisdiction': jurisdiction,
                 'law_category': law_category,
-                'document_title': document_title
+                'document_title': document_title,
+                'failed_chunks': failed_chunks if failed_chunks else None
             }
             
         except Exception as e:

@@ -68,7 +68,7 @@ class InvoiceListRequest(BaseModel):
     invoice_ids: List[int] = Field(
         ...,
         description="List of invoice database IDs to analyze",
-        min_items=1,
+        min_length=1,
     )
 
 # ============================================================================
@@ -123,13 +123,22 @@ _tax_workflow3 = None
 def get_tax_db_connection():
     """Create database connection for tax platform (uses same DB as main app)"""
     try:
+        # Determine SSL mode based on database host
+        ssl_mode = 'prefer'  # Default: try SSL, fallback to non-SSL
+        if Config.DB_HOST:
+            # NeonDB and cloud databases typically require SSL
+            if any(keyword in Config.DB_HOST.lower() for keyword in ['neon', 'aws', 'rds', 'cloud']):
+                ssl_mode = 'require'
+        
         conn = psycopg2.connect(
             host=Config.DB_HOST,
             port=Config.DB_PORT,
             database=Config.DB_NAME,
             user=Config.DB_USER,
             password=Config.DB_PASSWORD,
-            cursor_factory=RealDictCursor
+            sslmode=ssl_mode,
+            cursor_factory=RealDictCursor,
+            connect_timeout=10
         )
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -143,7 +152,8 @@ def get_tax_vectorizer():
     """Get or create tax vectorizer instance"""
     global _tax_vectorizer
     if _tax_vectorizer is None:
-        _tax_vectorizer = TaxVectorizer(api_key=Config.GEMINI_API_KEY)
+        # Vectorizer will auto-detect provider based on EMBEDDING_MODEL from config
+        _tax_vectorizer = TaxVectorizer()
     return _tax_vectorizer
 
 def get_tax_document_parser():
@@ -156,7 +166,7 @@ def get_tax_document_parser():
 def get_tax_db_conn():
     """Get or create tax database connection"""
     global _tax_db_conn
-    if _tax_db_conn is None:
+    if _tax_db_conn is None or _tax_db_conn.closed:
         _tax_db_conn = get_tax_db_connection()
     return _tax_db_conn
 
