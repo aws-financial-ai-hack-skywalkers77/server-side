@@ -207,7 +207,7 @@ class Vectorizer:
         if hasattr(response, '__dict__'):
             logger.error(f"Response dict: {response.__dict__}")
         raise ValueError("Could not extract answer from Gemini response")
-
+    
     def generate_answer(self, query: str, context_texts: list, contract_ids: list = None):
         """
         Generate an answer to a query using retrieved contract contexts (RAG).
@@ -249,7 +249,7 @@ User Question: {query}
 Please provide a clear, accurate answer based on the contract excerpts above. If you reference specific information, mention which contract it comes from if available."""
             
             model, model_name = self._get_generative_model()
-
+            
             # Generate response
             logger.info("Generating response from Gemini...")
             try:
