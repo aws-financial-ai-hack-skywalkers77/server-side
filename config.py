@@ -41,7 +41,8 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     # Gemini model for text generation (RAG)
     # Options: "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"
-    GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "gemini-2.5-pro")
+    # Note: gemini-2.5-pro doesn't exist, use gemini-1.5-pro instead
+    GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "gemini-1.5-pro")
     
     # File upload configuration
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp")

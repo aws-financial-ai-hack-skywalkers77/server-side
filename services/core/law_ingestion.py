@@ -76,6 +76,13 @@ class LawIngestionService:
                 chunk_text = chunk['text']
                 section_ref = chunk.get('section_reference', f"Section {idx + 1}")
                 
+                # Check if connection is closed and reconnect if needed
+                if self.db.closed:
+                    logger.warning("Database connection closed, attempting to reconnect...")
+                    # Note: This requires access to connection factory, which we'll handle in main.py
+                    # For now, raise an error to be handled by the caller
+                    raise ConnectionError("Database connection closed during ingestion. Please retry.")
+                
                 # Use a new cursor for each chunk to avoid transaction issues
                 # Ensure cursor uses the same factory as connection (RealDictCursor)
                 cursor = self.db.cursor()

@@ -26,8 +26,18 @@ class JurisdictionComparisonEngine:
     ):
         self.db = db_connection
         self.vectorizer = vectorizer
-        genai.configure(api_key=gemini_api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        if not gemini_api_key:
+            print("⚠️ WARNING: GEMINI_API_KEY is not set! LLM calls will fail.")
+        else:
+            genai.configure(api_key=gemini_api_key)
+            # Use model from config, fallback to gemini-1.5-pro
+            from config import Config
+            model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-1.5-pro'
+            # Remove 'models/' prefix if present (generation models don't use it)
+            if model_name.startswith('models/'):
+                model_name = model_name.replace('models/', '')
+            print(f"🤖 Initializing Gemini model: {model_name} with API key: {'*' * 10 + gemini_api_key[-4:] if gemini_api_key else 'NOT SET'}")
+            self.model = genai.GenerativeModel(model_name)
     
     async def create_comparison(
         self,
@@ -60,6 +70,13 @@ class JurisdictionComparisonEngine:
         print(f"   Scope: {scope}, Year: {tax_year}")
         
         # 1. Extract rules from both jurisdictions
+        # Ensure database connection is fresh
+        if self.db.closed:
+            print("⚠️ Database connection closed, attempting to reconnect...")
+            # Try to get a fresh connection - this requires access to the connection getter
+            # For now, raise an error and let the endpoint handle reconnection
+            raise ConnectionError("Database connection is closed - please retry the request")
+        
         base_rules = await self._extract_jurisdiction_rules(
             base_jurisdiction, scope, tax_year
         )
@@ -70,6 +87,23 @@ class JurisdictionComparisonEngine:
         
         print(f"📋 Base rules: {len(base_rules)} sections")
         print(f"📋 Target rules: {len(target_rules)} sections")
+        
+        if not base_rules and not target_rules:
+            print("⚠️ No rules found for either jurisdiction - cannot compare")
+            return {
+                'comparison_id': comparison_id,
+                'base_jurisdiction': base_jurisdiction,
+                'target_jurisdiction': target_jurisdiction,
+                'scope': scope,
+                'tax_year': tax_year,
+                'created_at': datetime.now().isoformat(),
+                'total_differences': 0,
+                'critical_differences': 0,
+                'important_differences': 0,
+                'differences': [],
+                'learning_checklist': [],
+                'note': 'No rules found in knowledge base for these jurisdictions'
+            }
         
         # 2. Perform intelligent comparison using LLM
         differences = await self._compare_rules_with_llm(
@@ -141,7 +175,12 @@ class JurisdictionComparisonEngine:
         for query in search_queries:
             query_embedding = await self.vectorizer.embed(query)
             
+            # Convert embedding list to string format for pgvector
+            embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+            
             cursor = self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            print(f"   Searching for: {query[:60]}...")
+            # Query with date filtering - but allow NULL dates (for documents without dates)
             cursor.execute("""
                 SELECT 
                     id,
@@ -154,20 +193,28 @@ class JurisdictionComparisonEngine:
                     1 - (embedding <=> %s::vector) as similarity
                 FROM tax_laws
                 WHERE jurisdiction = %s
-                AND effective_date <= %s::date
-                AND (expiry_date IS NULL OR expiry_date > %s::date)
+                AND (
+                    effective_date IS NULL 
+                    OR effective_date <= %s::date
+                )
+                AND (
+                    expiry_date IS NULL 
+                    OR expiry_date > %s::date
+                )
                 ORDER BY embedding <=> %s::vector
                 LIMIT 10
             """, (
-                query_embedding,
+                embedding_str,
                 jurisdiction,
                 f"{tax_year}-12-31",
                 f"{tax_year}-01-01",
-                query_embedding
+                embedding_str
             ))
             
             results = cursor.fetchall()
             cursor.close()
+            
+            print(f"   Found {len(results)} results for query")
             
             for row in results:
                 all_rules.append({
@@ -188,6 +235,7 @@ class JurisdictionComparisonEngine:
                 seen_ids.add(rule['id'])
                 unique_rules.append(rule)
         
+        print(f"📋 Extracted {len(unique_rules)} unique rules for {jurisdiction}")
         return unique_rules
     
     async def _compare_rules_with_llm(
@@ -202,6 +250,14 @@ class JurisdictionComparisonEngine:
         Use LLM to intelligently compare rules and identify differences
         """
         
+        # Check if we have rules to compare
+        if not base_rules:
+            print(f"⚠️ No rules found for base jurisdiction {base_jurisdiction}")
+            return []
+        if not target_rules:
+            print(f"⚠️ No rules found for target jurisdiction {target_jurisdiction}")
+            return []
+        
         # Prepare context
         base_context = "\n\n".join([
             f"[{rule['category']}] {rule['section']}\n{rule['text'][:500]}"
@@ -212,6 +268,8 @@ class JurisdictionComparisonEngine:
             f"[{rule['category']}] {rule['section']}\n{rule['text'][:500]}"
             for rule in target_rules[:15]
         ])
+        
+        print(f"📝 Comparing {len(base_rules)} base rules vs {len(target_rules)} target rules")
         
         prompt = f"""You are a tax expert helping a CA who knows {base_jurisdiction} tax law learn about {target_jurisdiction} tax law.
 
@@ -255,8 +313,13 @@ Return as JSON array:
 """
         
         try:
+            print(f"🤖 Calling LLM for comparison...")
+            print(f"   Base rules: {len(base_rules)} sections")
+            print(f"   Target rules: {len(target_rules)} sections")
             response = self.model.generate_content(prompt)
             result_text = response.text
+            print(f"✅ LLM response received ({len(result_text)} chars)")
+            print(f"   First 200 chars: {result_text[:200]}")
             
             # Extract JSON
             if '```json' in result_text:
@@ -265,6 +328,10 @@ Return as JSON array:
                 result_text = result_text.split('```')[1].split('```')[0]
             
             differences = json.loads(result_text.strip())
+            print(f"✅ Parsed {len(differences)} differences from LLM")
+            if len(differences) == 0:
+                print(f"⚠️  WARNING: LLM returned empty differences array")
+                print(f"   Full response: {result_text[:500]}")
             
             # Enrich with law IDs
             for diff in differences:
@@ -274,8 +341,16 @@ Return as JSON array:
             
             return differences
             
+        except json.JSONDecodeError as json_error:
+            print(f"❌ JSON parsing error: {json_error}")
+            print(f"   Response text: {result_text[:500] if 'result_text' in locals() else 'N/A'}")
+            import traceback
+            traceback.print_exc()
+            return []
         except Exception as e:
             print(f"❌ Error comparing with LLM: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     async def research_specific_topic(
@@ -487,6 +562,11 @@ Keep it practical and action-oriented. Focus on what matters for preparing accur
         differences: List[Dict]
     ):
         """Store comparison results in database"""
+        
+        # Check if connection is closed
+        if self.db.closed:
+            print("⚠️ Database connection closed, cannot store comparison")
+            return  # Skip storage if connection is closed
         
         cursor = self.db.cursor()
         

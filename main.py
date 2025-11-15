@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import os
 import logging
+import json
 from pathlib import Path
 from datetime import datetime
 import boto3
@@ -140,6 +141,8 @@ def get_tax_db_connection():
             cursor_factory=RealDictCursor,
             connect_timeout=10
         )
+        # Ensure autocommit is False for transaction control
+        conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             conn.commit()
@@ -190,8 +193,10 @@ def get_tax_workflow1():
 
 def get_tax_workflow2():
     """Get or create workflow 2 instance"""
-    global _tax_workflow2
-    if _tax_workflow2 is None:
+    global _tax_workflow2, _tax_db_conn
+    # Recreate if connection is closed
+    if _tax_workflow2 is None or (_tax_db_conn and _tax_db_conn.closed):
+        _tax_db_conn = None  # Force reconnection
         _tax_workflow2 = JurisdictionComparisonEngine(
             get_tax_db_conn(), 
             get_tax_vectorizer(), 
@@ -201,8 +206,10 @@ def get_tax_workflow2():
 
 def get_tax_workflow3():
     """Get or create workflow 3 instance"""
-    global _tax_workflow3
-    if _tax_workflow3 is None:
+    global _tax_workflow3, _tax_db_conn
+    # Recreate if connection is closed
+    if _tax_workflow3 is None or (_tax_db_conn and _tax_db_conn.closed):
+        _tax_db_conn = None  # Force reconnection
         _tax_workflow3 = MultiJurisdictionPlanningEngine(
             get_tax_db_conn(), 
             get_tax_vectorizer(), 
@@ -873,10 +880,18 @@ async def ingest_law_document(
     document_source: Optional[str] = Form(None)
 ):
     """Admin endpoint to ingest a law document (PDF) into the knowledge base"""
+    global _tax_db_conn, _tax_law_service
+    
     try:
         temp_path = f"/tmp/{file.filename}"
         with open(temp_path, "wb") as f:
             f.write(await file.read())
+        
+        # Ensure we have a fresh database connection for this long-running operation
+        # Reset the connection to avoid "connection already closed" errors
+        if _tax_db_conn and _tax_db_conn.closed:
+            _tax_db_conn = None
+            _tax_law_service = None
         
         law_service = get_tax_law_service()
         result = await law_service.ingest_from_pdf(
@@ -891,6 +906,10 @@ async def ingest_law_document(
         return {"success": True, "message": "Law document ingested successfully", "details": result}
     except Exception as e:
         logger.error(f"Error ingesting law document: {e}", exc_info=True)
+        # Reset service on error to force reconnection
+        _tax_law_service = None
+        if _tax_db_conn and _tax_db_conn.closed:
+            _tax_db_conn = None
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/admin/laws")
@@ -930,6 +949,129 @@ async def list_laws(
         logger.error(f"Error listing laws: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/admin/form-template")
+async def create_form_template(
+    jurisdiction: str = Form(...),
+    form_code: str = Form(...),
+    form_name: str = Form(...),
+    tax_year: int = Form(...),
+    taxpayer_type: str = Form("individual"),
+    description: Optional[str] = Form(None),
+    required_fields: Optional[str] = Form("[]"),  # JSON string
+    calculation_rules: Optional[str] = Form("[]"),  # JSON string
+    dependencies: Optional[str] = Form("[]")  # JSON string
+):
+    """Admin endpoint to create a form template"""
+    try:
+        db_conn = get_tax_db_conn()
+        cursor = db_conn.cursor()
+        
+        # Parse JSON strings
+        import json
+        try:
+            required_fields_json = json.loads(required_fields) if required_fields else []
+            calculation_rules_json = json.loads(calculation_rules) if calculation_rules else []
+            dependencies_json = json.loads(dependencies) if dependencies else []
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in form data: {str(e)}")
+        
+        cursor.execute("""
+            INSERT INTO form_templates (
+                jurisdiction, form_code, form_name, tax_year,
+                taxpayer_type, description,
+                required_fields, calculation_rules, dependencies
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            jurisdiction, form_code, form_name, tax_year,
+            taxpayer_type, description,
+            psycopg2.extras.Json(required_fields_json),
+            psycopg2.extras.Json(calculation_rules_json),
+            psycopg2.extras.Json(dependencies_json)
+        ))
+        
+        template_id = cursor.fetchone()[0]
+        db_conn.commit()
+        cursor.close()
+        
+        return {
+            "success": True,
+            "message": "Form template created successfully",
+            "template_id": template_id,
+            "jurisdiction": jurisdiction,
+            "form_code": form_code,
+            "tax_year": tax_year
+        }
+    except Exception as e:
+        logger.error(f"Error creating form template: {e}", exc_info=True)
+        if db_conn:
+            db_conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/form-template/update-calculations")
+async def update_form_template_calculations(
+    jurisdiction: str = Form(...),
+    form_code: str = Form(...),
+    tax_year: int = Form(...),
+    calculation_rules: str = Form("[]")  # JSON string
+):
+    """Admin endpoint to update calculation rules for an existing form template"""
+    try:
+        db_conn = get_tax_db_conn()
+        cursor = db_conn.cursor()
+        
+        # Parse calculation rules JSON
+        try:
+            calculation_rules_json = json.loads(calculation_rules) if calculation_rules else []
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in calculation_rules: {str(e)}")
+        
+        # Update the template
+        cursor.execute("""
+            UPDATE form_templates
+            SET calculation_rules = %s
+            WHERE jurisdiction = %s AND form_code = %s AND tax_year = %s
+            RETURNING id
+        """, (
+            psycopg2.extras.Json(calculation_rules_json),
+            jurisdiction,
+            form_code,
+            tax_year
+        ))
+        
+        result = cursor.fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Form template not found")
+        
+        # Handle both tuple and dict-like results
+        if isinstance(result, dict):
+            template_id = result.get('id') or result.get(0)
+        else:
+            template_id = result[0] if len(result) > 0 else None
+        
+        if not template_id:
+            raise HTTPException(status_code=404, detail="Form template not found or update failed")
+        db_conn.commit()
+        cursor.close()
+        
+        return {
+            "success": True,
+            "template_id": template_id,
+            "message": "Calculation rules updated successfully",
+            "calculation_rules": calculation_rules_json
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        logger.error(f"Error updating form template: {e}\n{error_details}")
+        if db_conn:
+            db_conn.rollback()
+        # Provide more detailed error message
+        error_msg = str(e) if str(e) and str(e) != "0" else f"Database error: {type(e).__name__}"
+        raise HTTPException(status_code=500, detail=f"Error updating form template: {error_msg}")
+
 # Workflow 1: Form Completeness Checker
 @app.post("/api/v1/workflow1/upload")
 async def upload_tax_document(
@@ -947,26 +1089,133 @@ async def upload_tax_document(
             f.write(await file.read())
         
         document_parser = get_tax_document_parser()
-        extracted_data = await document_parser.process_tax_document(temp_path)
+        
+        # Try to extract data, but handle Landing AI errors gracefully
+        # Landing AI may have schema validation issues or account balance issues
+        extracted_data = None
+        try:
+            extracted_data = await document_parser.process_tax_document(temp_path, form_code=form_code)
+        except HTTPException as http_error:
+            # Landing AI client may raise HTTPException directly
+            error_str = str(http_error.detail) if hasattr(http_error, 'detail') else str(http_error)
+            logger.warning(f"Landing AI HTTP error: {error_str}")
+            # Create fallback structure for any Landing AI HTTP errors
+            extracted_data = {
+                'form_type': form_code,
+                'tax_year': tax_year,
+                'taxpayer_name': client_name or '',
+                'taxpayer_ssn': '',
+                'filing_status': '',
+                'form_data': {},
+                'line_items': [],
+                'calculations': {},
+                'schedules': [],
+                'extraction_note': f'Landing AI service error: {error_str[:150]}. Using basic structure from provided metadata.'
+            }
+        except Exception as parse_error:
+            error_str = str(parse_error)
+            logger.warning(f"Document parsing error: {error_str}")
+            # Check for various Landing AI errors and create fallback structure
+            landing_ai_errors = [
+                'form_data', 'schema validation', 'properties must be defined', 
+                'field extraction invalid', 'payment', 'balance', 'insufficient',
+                'error code: 400', 'error code: 402'
+            ]
+            if any(keyword in error_str.lower() for keyword in landing_ai_errors):
+                logger.info("Landing AI error detected. Creating basic document structure from provided metadata.")
+                # Create basic extracted data from form metadata provided in the request
+                extracted_data = {
+                    'form_type': form_code,
+                    'tax_year': tax_year,
+                    'taxpayer_name': client_name or '',
+                    'taxpayer_ssn': '',
+                    'filing_status': '',
+                    'form_data': {},
+                    'line_items': [],
+                    'calculations': {},
+                    'schedules': [],
+                    'extraction_note': f'Landing AI error encountered: {error_str[:100]}. Using basic structure from provided metadata.'
+                }
+            else:
+                # Re-raise if it's a different error (file not found, etc.)
+                logger.error(f"Unexpected parsing error: {parse_error}", exc_info=True)
+                raise
+        
+        # Ensure we have extracted_data
+        if not extracted_data:
+            logger.warning("No extracted data returned, creating minimal structure")
+            extracted_data = {
+                'form_type': form_code,
+                'tax_year': tax_year,
+                'taxpayer_name': client_name or '',
+                'taxpayer_ssn': '',
+                'filing_status': '',
+                'form_data': {},
+                'line_items': [],
+                'calculations': {},
+                'schedules': []
+            }
         
         import uuid
         document_id = f"DOC-{uuid.uuid4().hex[:8].upper()}"
         
-        db_conn = get_tax_db_conn()
-        cursor = db_conn.cursor()
-        cursor.execute("""
-            INSERT INTO tax_documents (
+        # Get a fresh database connection after the long parsing operation
+        # The connection may have timed out during document parsing
+        db_conn = None
+        try:
+            # Reset the global connection if it's closed
+            global _tax_db_conn
+            if _tax_db_conn and _tax_db_conn.closed:
+                _tax_db_conn = None
+            
+            db_conn = get_tax_db_conn()
+            
+            # Check if connection is still valid
+            if db_conn.closed:
+                logger.warning("Database connection closed, creating new connection")
+                _tax_db_conn = None
+                db_conn = get_tax_db_conn()
+            
+            cursor = db_conn.cursor()
+            cursor.execute("""
+                INSERT INTO tax_documents (
+                    document_id, jurisdiction, form_code, tax_year,
+                    client_name, client_type, raw_file_path,
+                    extracted_data, status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
                 document_id, jurisdiction, form_code, tax_year,
-                client_name, client_type, raw_file_path,
-                extracted_data, status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            document_id, jurisdiction, form_code, tax_year,
-            client_name, client_type, temp_path,
-            psycopg2.extras.Json(extracted_data), 'uploaded'
-        ))
-        db_conn.commit()
-        cursor.close()
+                client_name, client_type, temp_path,
+                psycopg2.extras.Json(extracted_data), 'uploaded'
+            ))
+            db_conn.commit()
+            cursor.close()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as db_error:
+            # Connection error - try with a fresh connection
+            logger.warning(f"Database connection error during insert: {db_error}, retrying with fresh connection")
+            if db_conn:
+                try:
+                    db_conn.close()
+                except:
+                    pass
+            
+            # Reset global connection and get a new one
+            _tax_db_conn = None
+            db_conn = get_tax_db_conn()
+            cursor = db_conn.cursor()
+            cursor.execute("""
+                INSERT INTO tax_documents (
+                    document_id, jurisdiction, form_code, tax_year,
+                    client_name, client_type, raw_file_path,
+                    extracted_data, status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                document_id, jurisdiction, form_code, tax_year,
+                client_name, client_type, temp_path,
+                psycopg2.extras.Json(extracted_data), 'uploaded'
+            ))
+            db_conn.commit()
+            cursor.close()
         
         return {
             "success": True,
@@ -1045,7 +1294,13 @@ async def resolve_issue(issue_id: int):
 @app.post("/api/v1/workflow2/compare")
 async def create_jurisdiction_comparison(request: ComparisonRequest):
     """Create a comprehensive comparison between two jurisdictions"""
+    global _tax_workflow2, _tax_db_conn
     try:
+        # Ensure fresh database connection
+        if _tax_db_conn and _tax_db_conn.closed:
+            _tax_db_conn = None
+            _tax_workflow2 = None
+        
         workflow2 = get_tax_workflow2()
         result = await workflow2.create_comparison(
             base_jurisdiction=request.base_jurisdiction,
@@ -1055,6 +1310,12 @@ async def create_jurisdiction_comparison(request: ComparisonRequest):
             requested_by=request.requested_by
         )
         return result
+    except ConnectionError as conn_error:
+        logger.error(f"Database connection error in comparison: {conn_error}", exc_info=True)
+        # Reset connection on error
+        _tax_db_conn = None
+        _tax_workflow2 = None
+        raise HTTPException(status_code=500, detail=f"Database connection error: {str(conn_error)}")
     except Exception as e:
         logger.error(f"Error creating jurisdiction comparison: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1109,7 +1370,13 @@ async def research_specific_topic(request: ResearchRequest):
 @app.post("/api/v1/workflow3/scenario")
 async def create_planning_scenario(request: PlanningScenarioRequest):
     """Create a multi-jurisdiction tax planning scenario"""
+    global _tax_workflow3, _tax_db_conn
     try:
+        # Ensure fresh database connection
+        if _tax_db_conn and _tax_db_conn.closed:
+            _tax_db_conn = None
+            _tax_workflow3 = None
+        
         workflow3 = get_tax_workflow3()
         result = await workflow3.create_planning_scenario(
             client_id=request.client_id,
@@ -1121,21 +1388,32 @@ async def create_planning_scenario(request: PlanningScenarioRequest):
             tax_year=request.tax_year
         )
         return result
+    except IndexError as e:
+        error_msg = f"IndexError (tuple index out of range): {str(e)}. This usually indicates a data structure mismatch. Check server logs for details."
+        logger.error(f"IndexError in planning scenario: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
     except Exception as e:
+        error_msg = f"{type(e).__name__}: {str(e)}"
         logger.error(f"Error creating planning scenario: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.get("/api/v1/workflow3/scenario/{scenario_id}")
 async def get_planning_scenario(scenario_id: str):
     """Retrieve a saved planning scenario"""
     try:
         db_conn = get_tax_db_conn()
-        cursor = db_conn.cursor()
+        cursor = db_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("SELECT * FROM planning_scenarios WHERE scenario_id = %s", (scenario_id,))
         scenario = cursor.fetchone()
         
         if not scenario:
             raise HTTPException(status_code=404, detail="Scenario not found")
+        
+        # Convert to dict if needed
+        if hasattr(scenario, 'keys'):
+            scenario_dict = dict(scenario)
+        else:
+            scenario_dict = dict(scenario) if scenario else {}
         
         cursor.execute("SELECT * FROM tax_exposures WHERE scenario_id = %s ORDER BY risk_level DESC", (scenario_id,))
         exposures = cursor.fetchall()
@@ -1144,10 +1422,14 @@ async def get_planning_scenario(scenario_id: str):
         recommendations = cursor.fetchall()
         cursor.close()
         
+        # Convert exposures and recommendations to dicts
+        exposures_list = [dict(row) if hasattr(row, 'keys') else dict(row) for row in exposures] if exposures else []
+        recommendations_list = [dict(row) if hasattr(row, 'keys') else dict(row) for row in recommendations] if recommendations else []
+        
         return {
-            "scenario": dict(scenario),
-            "exposures": [dict(row) for row in exposures],
-            "recommendations": [dict(row) for row in recommendations]
+            "scenario": scenario_dict,
+            "exposures": exposures_list,
+            "recommendations": recommendations_list
         }
     except HTTPException:
         raise

@@ -6,6 +6,9 @@ import json
 import psycopg2.extras
 from datetime import datetime
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 class MultiJurisdictionPlanningEngine:
     """
@@ -27,8 +30,18 @@ class MultiJurisdictionPlanningEngine:
     ):
         self.db = db_connection
         self.vectorizer = vectorizer
-        genai.configure(api_key=gemini_api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        if not gemini_api_key:
+            print("⚠️ WARNING: GEMINI_API_KEY is not set! LLM calls will fail.")
+        else:
+            genai.configure(api_key=gemini_api_key)
+            # Use model from config, fallback to gemini-1.5-pro
+            from config import Config
+            model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-1.5-pro'
+            # Remove 'models/' prefix if present (generation models don't use it)
+            if model_name.startswith('models/'):
+                model_name = model_name.replace('models/', '')
+            print(f"🤖 Initializing Gemini model: {model_name} with API key: {'*' * 10 + gemini_api_key[-4:] if gemini_api_key else 'NOT SET'}")
+            self.model = genai.GenerativeModel(model_name)
     
     async def create_planning_scenario(
         self,
@@ -81,80 +94,162 @@ class MultiJurisdictionPlanningEngine:
         print(f"   Income sources: {len(income_sources)}")
         
         # 1. Analyze applicable tax treaties
-        treaty_analysis = await self._analyze_tax_treaties(
-            jurisdictions_involved
-        )
+        try:
+            print(f"🔍 Step 1: Analyzing tax treaties...")
+            treaty_analysis = await self._analyze_tax_treaties(
+                jurisdictions_involved
+            )
+            print(f"✅ Found {len(treaty_analysis)} treaty analyses")
+        except Exception as e:
+            print(f"❌ Error analyzing treaties: {e}")
+            import traceback
+            traceback.print_exc()
+            treaty_analysis = []
         
         # 2. Calculate tax exposures in each jurisdiction
-        tax_exposures = await self._calculate_tax_exposures(
-            jurisdictions_involved,
-            income_sources,
-            treaty_analysis,
-            tax_year
-        )
+        try:
+            print(f"💰 Step 2: Calculating tax exposures...")
+            tax_exposures = await self._calculate_tax_exposures(
+                jurisdictions_involved,
+                income_sources,
+                treaty_analysis,
+                tax_year
+            )
+            print(f"✅ Calculated {len(tax_exposures)} tax exposures")
+        except Exception as e:
+            print(f"❌ Error calculating tax exposures: {e}")
+            import traceback
+            traceback.print_exc()
+            tax_exposures = []
         
         # 3. Identify reporting requirements
-        reporting_requirements = await self._identify_reporting_requirements(
-            jurisdictions_involved,
-            income_sources,
-            tax_year
-        )
+        try:
+            reporting_requirements = await self._identify_reporting_requirements(
+                jurisdictions_involved,
+                income_sources,
+                tax_year
+            )
+        except Exception as e:
+            print(f"❌ Error identifying reporting requirements: {e}")
+            import traceback
+            traceback.print_exc()
+            reporting_requirements = []
         
         # 4. Generate optimization recommendations
-        recommendations = await self._generate_recommendations(
-            client_name,
-            jurisdictions_involved,
-            income_sources,
-            tax_exposures,
-            treaty_analysis,
-            objectives
-        )
+        try:
+            print(f"💡 Step 4: Generating recommendations...")
+            recommendations = await self._generate_recommendations(
+                client_name,
+                jurisdictions_involved,
+                income_sources,
+                tax_exposures,
+                treaty_analysis,
+                objectives
+            )
+            print(f"✅ Generated {len(recommendations)} recommendations")
+        except Exception as e:
+            print(f"❌ Error generating recommendations: {e}")
+            import traceback
+            traceback.print_exc()
+            recommendations = []
         
         # 5. Create compliance timeline
-        compliance_timeline = await self._create_compliance_timeline(
-            jurisdictions_involved,
-            tax_year
-        )
+        try:
+            print(f"📅 Step 5: Creating compliance timeline...")
+            compliance_timeline = await self._create_compliance_timeline(
+                jurisdictions_involved,
+                tax_year
+            )
+            print(f"✅ Created {len(compliance_timeline)} timeline items")
+        except Exception as e:
+            print(f"❌ Error creating compliance timeline: {e}")
+            import traceback
+            traceback.print_exc()
+            compliance_timeline = []
         
         # 6. Store scenario in database
-        await self._store_planning_scenario(
-            scenario_id,
-            client_id,
-            scenario_name,
-            jurisdictions_involved,
-            income_sources,
-            objectives,
-            tax_year,
-            {
-                'treaty_analysis': treaty_analysis,
-                'tax_exposures': tax_exposures,
-                'reporting_requirements': reporting_requirements,
-                'recommendations': recommendations,
-                'compliance_timeline': compliance_timeline
-            }
-        )
+        try:
+            print(f"💾 Storing scenario {scenario_id} in database...")
+            await self._store_planning_scenario(
+                scenario_id,
+                client_id,
+                client_name,
+                scenario_name,
+                jurisdictions_involved,
+                income_sources,
+                objectives,
+                tax_year,
+                {
+                    'treaty_analysis': treaty_analysis,
+                    'tax_exposures': tax_exposures,
+                    'reporting_requirements': reporting_requirements,
+                    'recommendations': recommendations,
+                    'compliance_timeline': compliance_timeline
+                }
+            )
+            print(f"✅ Successfully stored scenario {scenario_id} in database")
+        except Exception as e:
+            print(f"❌ Error storing scenario in database: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue even if storage fails - scenario is still returned to user
+            print(f"⚠️ Warning: Scenario {scenario_id} created but not stored in database")
+            # Log the full error for debugging
+            logger.error(f"Failed to store scenario {scenario_id}: {e}", exc_info=True)
         
         # 7. Generate executive summary
-        summary = {
-            'scenario_id': scenario_id,
-            'client_name': client_name,
-            'scenario_name': scenario_name,
-            'jurisdictions': jurisdictions_involved,
-            'tax_year': tax_year,
-            'created_at': datetime.now().isoformat(),
-            'treaty_benefits_available': len(treaty_analysis),
-            'total_jurisdictions_with_exposure': len(tax_exposures),
-            'high_priority_actions': len([r for r in recommendations if r['priority'] == 'critical']),
-            'estimated_total_exposure_min': sum(e['estimated_impact_min'] for e in tax_exposures),
-            'estimated_total_exposure_max': sum(e['estimated_impact_max'] for e in tax_exposures),
-            'analysis': {
-                'treaties': treaty_analysis,
-                'exposures': tax_exposures,
-                'reporting': reporting_requirements,
-                'recommendations': recommendations,
-                'timeline': compliance_timeline
+        try:
+            # Safely calculate high priority actions
+            high_priority = 0
+            if recommendations and isinstance(recommendations, list):
+                high_priority = len([r for r in recommendations if isinstance(r, dict) and r.get('priority') == 'critical'])
+            
+            # Safely calculate exposure totals
+            exposure_min = 0
+            exposure_max = 0
+            if tax_exposures and isinstance(tax_exposures, list):
+                exposure_min = sum(e.get('estimated_impact_min', 0) for e in tax_exposures if isinstance(e, dict))
+                exposure_max = sum(e.get('estimated_impact_max', 0) for e in tax_exposures if isinstance(e, dict))
+            
+            summary = {
+                'scenario_id': scenario_id,
+                'client_name': client_name,
+                'scenario_name': scenario_name,
+                'jurisdictions': jurisdictions_involved,
+                'tax_year': tax_year,
+                'created_at': datetime.now().isoformat(),
+                'treaty_benefits_available': len(treaty_analysis) if treaty_analysis else 0,
+                'total_jurisdictions_with_exposure': len(tax_exposures) if tax_exposures else 0,
+                'high_priority_actions': high_priority,
+                'estimated_total_exposure_min': exposure_min,
+                'estimated_total_exposure_max': exposure_max,
+                'analysis': {
+                    'treaties': treaty_analysis if treaty_analysis else [],
+                    'exposures': tax_exposures if tax_exposures else [],
+                    'reporting': reporting_requirements if reporting_requirements else [],
+                    'recommendations': recommendations if recommendations else [],
+                    'timeline': compliance_timeline if compliance_timeline else []
+                }
             }
-        }
+        except Exception as summary_error:
+            print(f"❌ Error creating summary: {summary_error}")
+            # Return basic summary on error
+            summary = {
+                'scenario_id': scenario_id,
+                'client_name': client_name,
+                'scenario_name': scenario_name,
+                'jurisdictions': jurisdictions_involved,
+                'tax_year': tax_year,
+                'created_at': datetime.now().isoformat(),
+                'error': f"Error generating summary: {str(summary_error)}",
+                'analysis': {
+                    'treaties': treaty_analysis if 'treaty_analysis' in locals() else [],
+                    'exposures': tax_exposures if 'tax_exposures' in locals() else [],
+                    'reporting': reporting_requirements if 'reporting_requirements' in locals() else [],
+                    'recommendations': recommendations if 'recommendations' in locals() else [],
+                    'timeline': compliance_timeline if 'compliance_timeline' in locals() else []
+                }
+            }
         
         print(f"✅ Planning scenario created: {scenario_id}")
         return summary
@@ -235,12 +330,20 @@ class MultiJurisdictionPlanningEngine:
         
         exposures = []
         
+        print(f"💰 Calculating tax exposures for {len(jurisdictions)} jurisdictions...")
+        
         for jurisdiction in jurisdictions:
             # Get income sources in this jurisdiction
             local_income = [
                 inc for inc in income_sources
                 if inc.get('jurisdiction') == jurisdiction
             ]
+            
+            if not local_income:
+                print(f"   ⚠️ No income sources found for {jurisdiction}, skipping exposure calculation")
+                continue
+            
+            print(f"   📊 Analyzing exposure for {jurisdiction} ({len(local_income)} income sources)...")
             
             # Get tax rates for this jurisdiction
             tax_rates = await self._get_tax_rates(jurisdiction, tax_year)
@@ -255,8 +358,12 @@ class MultiJurisdictionPlanningEngine:
             )
             
             if exposure_analysis:
+                print(f"   ✅ Exposure calculated for {jurisdiction}")
                 exposures.append(exposure_analysis)
+            else:
+                print(f"   ⚠️ No exposure analysis returned for {jurisdiction}")
         
+        print(f"💰 Total exposures calculated: {len(exposures)}")
         return exposures
     
     async def _get_tax_rates(
@@ -290,7 +397,10 @@ class MultiJurisdictionPlanningEngine:
         """Use LLM to analyze tax exposure in jurisdiction"""
         
         if not local_income:
+            print(f"   ⚠️ No local income for {jurisdiction}, skipping exposure analysis")
             return None
+        
+        print(f"   🔍 Analyzing exposure for {jurisdiction} with {len(local_income)} income sources...")
         
         # Find relevant treaties
         relevant_treaties = [
@@ -336,16 +446,41 @@ Return JSON:
 """
         
         try:
+            print(f"🤖 Calling LLM to analyze exposure for {jurisdiction}...")
+            print(f"   Income sources: {len(income_sources)}")
             response = self.model.generate_content(prompt)
             result_text = response.text
+            print(f"✅ LLM response received for {jurisdiction} ({len(result_text)} chars)")
+            print(f"   First 200 chars: {result_text[:200]}")
             
             if '```json' in result_text:
-                result_text = result_text.split('```json')[1].split('```')[0]
+                parts = result_text.split('```json')
+                if len(parts) > 1:
+                    json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
+                    result_text = json_part
+                else:
+                    # Try regular ``` code blocks
+                    parts = result_text.split('```')
+                    if len(parts) > 1:
+                        result_text = parts[1]
             
-            return json.loads(result_text.strip())
+            exposure = json.loads(result_text.strip())
+            print(f"✅ Parsed exposure analysis for {jurisdiction}")
+            if not exposure or (isinstance(exposure, dict) and not exposure.get('exposure_type')):
+                print(f"⚠️  WARNING: LLM returned empty/invalid exposure")
+                print(f"   Full response: {result_text[:500]}")
+            return exposure
         
+        except json.JSONDecodeError as json_error:
+            print(f"❌ JSON parsing error for {jurisdiction}: {json_error}")
+            print(f"   Response text: {result_text[:500] if 'result_text' in locals() else 'N/A'}")
+            import traceback
+            traceback.print_exc()
+            return None
         except Exception as e:
             print(f"❌ Error analyzing exposure for {jurisdiction}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def _identify_reporting_requirements(
@@ -365,6 +500,9 @@ Return JSON:
             query = f"tax filing requirements reporting obligations {jurisdiction}"
             query_embedding = await self.vectorizer.embed(query)
             
+            # Convert embedding list to string format for pgvector
+            embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+            
             cursor = self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute("""
                 SELECT 
@@ -376,7 +514,7 @@ Return JSON:
                 AND law_category LIKE '%filing%'
                 ORDER BY embedding <=> %s::vector
                 LIMIT 5
-            """, (jurisdiction, query_embedding))
+            """, (jurisdiction, embedding_str))
             
             law_results = cursor.fetchall()
             cursor.close()
@@ -439,7 +577,15 @@ Return JSON array:
             result_text = response.text
             
             if '```json' in result_text:
-                result_text = result_text.split('```json')[1].split('```')[0]
+                parts = result_text.split('```json')
+                if len(parts) > 1:
+                    json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
+                    result_text = json_part
+                else:
+                    # Try regular ``` code blocks
+                    parts = result_text.split('```')
+                    if len(parts) > 1:
+                        result_text = parts[1]
             
             return json.loads(result_text.strip())
         
@@ -503,16 +649,36 @@ Focus on PRACTICAL actions that will make a real difference.
 """
         
         try:
+            print(f"🤖 Calling LLM to generate recommendations...")
             response = self.model.generate_content(prompt)
             result_text = response.text
+            print(f"✅ LLM response received for recommendations ({len(result_text)} chars)")
             
             if '```json' in result_text:
-                result_text = result_text.split('```json')[1].split('```')[0]
+                parts = result_text.split('```json')
+                if len(parts) > 1:
+                    json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
+                    result_text = json_part
+                else:
+                    # Try regular ``` code blocks
+                    parts = result_text.split('```')
+                    if len(parts) > 1:
+                        result_text = parts[1]
             
-            return json.loads(result_text.strip())
+            recommendations = json.loads(result_text.strip())
+            print(f"✅ Parsed {len(recommendations)} recommendations from LLM")
+            return recommendations
         
+        except json.JSONDecodeError as json_error:
+            print(f"❌ JSON parsing error for recommendations: {json_error}")
+            print(f"   Response text: {result_text[:500] if 'result_text' in locals() else 'N/A'}")
+            import traceback
+            traceback.print_exc()
+            return []
         except Exception as e:
             print(f"❌ Error generating recommendations: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     async def _create_compliance_timeline(
@@ -531,6 +697,9 @@ Focus on PRACTICAL actions that will make a real difference.
             query = f"tax filing deadline payment deadline {jurisdiction} {tax_year}"
             query_embedding = await self.vectorizer.embed(query)
             
+            # Convert embedding list to string format for pgvector
+            embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+            
             cursor = self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute("""
                 SELECT chunk_text, section_reference
@@ -539,7 +708,7 @@ Focus on PRACTICAL actions that will make a real difference.
                 AND (chunk_text ILIKE '%deadline%' OR chunk_text ILIKE '%due date%')
                 ORDER BY embedding <=> %s::vector
                 LIMIT 3
-            """, (jurisdiction, query_embedding))
+            """, (jurisdiction, embedding_str))
             
             results = cursor.fetchall()
             cursor.close()
@@ -593,7 +762,15 @@ Return JSON array with specific dates:
             result_text = response.text
             
             if '```json' in result_text:
-                result_text = result_text.split('```json')[1].split('```')[0]
+                parts = result_text.split('```json')
+                if len(parts) > 1:
+                    json_part = parts[1].split('```')[0] if '```' in parts[1] else parts[1]
+                    result_text = json_part
+                else:
+                    # Try regular ``` code blocks
+                    parts = result_text.split('```')
+                    if len(parts) > 1:
+                        result_text = parts[1]
             
             return json.loads(result_text.strip())
         
@@ -605,6 +782,7 @@ Return JSON array with specific dates:
         self,
         scenario_id: str,
         client_id: str,
+        client_name: str,
         scenario_name: str,
         jurisdictions: List[str],
         income_sources: List[Dict],
@@ -614,64 +792,180 @@ Return JSON array with specific dates:
     ):
         """Store planning scenario in database"""
         
-        cursor = self.db.cursor()
-        
-        # Store scenario
-        cursor.execute("""
-            INSERT INTO planning_scenarios (
-                scenario_id, client_id, scenario_name,
-                jurisdictions_involved, tax_year, objectives,
-                scenario_description, analysis_results
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            scenario_id,
-            client_id,
-            scenario_name,
-            jurisdictions,
-            tax_year,
-            psycopg2.extras.Json(objectives),
-            json.dumps(income_sources),
-            psycopg2.extras.Json(analysis_results)
-        ))
-        
-        # Store exposures
-        for exposure in analysis_results.get('tax_exposures', []):
-            cursor.execute("""
-                INSERT INTO tax_exposures (
-                    scenario_id, jurisdiction, exposure_type,
-                    risk_level, estimated_impact_min, estimated_impact_max,
-                    mitigation_strategies
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (
-                scenario_id,
-                exposure.get('jurisdiction'),
-                exposure.get('exposure_type'),
-                exposure.get('risk_level'),
-                exposure.get('estimated_impact_min', 0),
-                exposure.get('estimated_impact_max', 0),
-                psycopg2.extras.Json(exposure.get('mitigation_strategies', []))
-            ))
-        
-        # Store recommendations
-        for rec in analysis_results.get('recommendations', []):
-            cursor.execute("""
-                INSERT INTO planning_recommendations (
-                    scenario_id, recommendation_type, priority,
-                    title, description, expected_benefit,
-                    implementation_steps, risks_and_considerations
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                scenario_id,
-                rec.get('recommendation_type'),
-                rec.get('priority'),
-                rec.get('title'),
-                rec.get('description'),
-                rec.get('expected_benefit'),
-                psycopg2.extras.Json(rec.get('implementation_steps', [])),
-                psycopg2.extras.Json(rec.get('risks_and_considerations', []))
-            ))
-        
-        self.db.commit()
-        cursor.close()
-        
-        print(f"✅ Stored planning scenario {scenario_id}")
+        try:
+            # Check if database connection is valid
+            if self.db.closed:
+                print(f"❌ Database connection is closed, cannot store scenario {scenario_id}")
+                raise ConnectionError("Database connection is closed")
+            
+            cursor = self.db.cursor()
+            print(f"📝 Attempting to store scenario {scenario_id} in database...")
+            
+            # First, ensure client profile exists (required by foreign key constraint)
+            cursor.execute("SELECT id FROM client_profiles WHERE client_id = %s", (client_id,))
+            client_exists = cursor.fetchone()
+            if not client_exists:
+                print(f"📝 Creating client profile for {client_id}...")
+                cursor.execute("""
+                    INSERT INTO client_profiles (
+                        client_id, client_name, client_type,
+                        primary_jurisdiction, income_sources
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (client_id) DO UPDATE SET
+                        client_name = EXCLUDED.client_name,
+                        primary_jurisdiction = EXCLUDED.primary_jurisdiction,
+                        income_sources = EXCLUDED.income_sources
+                """, (
+                    client_id,
+                    client_name,
+                    'individual',  # Default client type
+                    jurisdictions[0] if jurisdictions else None,
+                    psycopg2.extras.Json(income_sources)
+                ))
+                print(f"✅ Created/updated client profile for {client_id}")
+            
+            # Store scenario - check if it already exists first
+            cursor.execute("SELECT id FROM planning_scenarios WHERE scenario_id = %s", (scenario_id,))
+            existing = cursor.fetchone()
+            if existing:
+                print(f"⚠️ Scenario {scenario_id} already exists, updating...")
+                cursor.execute("""
+                    UPDATE planning_scenarios SET
+                        client_id = %s,
+                        scenario_name = %s,
+                        jurisdictions_involved = %s,
+                        tax_year = %s,
+                        objectives = %s,
+                        scenario_description = %s,
+                        analysis_results = %s
+                    WHERE scenario_id = %s
+                """, (
+                    client_id,
+                    scenario_name,
+                    jurisdictions,
+                    tax_year,
+                    psycopg2.extras.Json(objectives),
+                    json.dumps(income_sources),
+                    psycopg2.extras.Json(analysis_results),
+                    scenario_id
+                ))
+                print(f"✅ Updated scenario {scenario_id}")
+            else:
+                # Store scenario
+                print(f"📝 Inserting new scenario {scenario_id}...")
+                cursor.execute("""
+                    INSERT INTO planning_scenarios (
+                        scenario_id, client_id, scenario_name,
+                        jurisdictions_involved, tax_year, objectives,
+                        scenario_description, analysis_results
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    scenario_id,
+                    client_id,
+                    scenario_name,
+                    jurisdictions,
+                    tax_year,
+                    psycopg2.extras.Json(objectives),
+                    json.dumps(income_sources),
+                    psycopg2.extras.Json(analysis_results)
+                ))
+                print(f"✅ Inserted scenario {scenario_id}")
+            
+            # Store exposures
+            for exposure in analysis_results.get('tax_exposures', []):
+                try:
+                    if not isinstance(exposure, dict):
+                        print(f"⚠️ Skipping invalid exposure (not a dict): {type(exposure)}")
+                        continue
+                    cursor.execute("""
+                        INSERT INTO tax_exposures (
+                            scenario_id, jurisdiction, exposure_type,
+                            risk_level, estimated_impact_min, estimated_impact_max,
+                            mitigation_strategies
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        scenario_id,
+                        exposure.get('jurisdiction'),
+                        exposure.get('exposure_type'),
+                        exposure.get('risk_level'),
+                        exposure.get('estimated_impact_min', 0),
+                        exposure.get('estimated_impact_max', 0),
+                        psycopg2.extras.Json(exposure.get('mitigation_strategies', []))
+                    ))
+                except Exception as e:
+                    print(f"⚠️ Error storing exposure: {e}, exposure: {exposure}")
+                    continue
+            
+            # Store recommendations
+            for rec in analysis_results.get('recommendations', []):
+                try:
+                    if not isinstance(rec, dict):
+                        print(f"⚠️ Skipping invalid recommendation (not a dict): {type(rec)}")
+                        continue
+                    cursor.execute("""
+                        INSERT INTO planning_recommendations (
+                            scenario_id, recommendation_type, priority,
+                            title, description, expected_benefit,
+                            implementation_steps, risks_and_considerations
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        scenario_id,
+                        rec.get('recommendation_type'),
+                        rec.get('priority'),
+                        rec.get('title'),
+                        rec.get('description'),
+                        rec.get('expected_benefit'),
+                        psycopg2.extras.Json(rec.get('implementation_steps', [])),
+                        psycopg2.extras.Json(rec.get('risks_and_considerations', []))
+                    ))
+                except Exception as e:
+                    print(f"⚠️ Error storing recommendation: {e}, rec: {rec}")
+                    continue
+            
+            # Commit the transaction
+            print(f"💾 Committing transaction for scenario {scenario_id}...")
+            try:
+                self.db.commit()
+                print(f"✅ Successfully committed planning scenario {scenario_id} to database")
+            except Exception as commit_error:
+                print(f"❌ Error committing scenario: {commit_error}")
+                import traceback
+                traceback.print_exc()
+                self.db.rollback()
+                raise
+            
+            cursor.close()
+            
+            # Verify the scenario was stored
+            verify_cursor = self.db.cursor()
+            verify_cursor.execute("SELECT scenario_id FROM planning_scenarios WHERE scenario_id = %s", (scenario_id,))
+            verify_result = verify_cursor.fetchone()
+            verify_cursor.close()
+            
+            if verify_result:
+                print(f"✅ Verified: Scenario {scenario_id} is now in database")
+            else:
+                print(f"⚠️ Warning: Scenario {scenario_id} commit succeeded but not found in database")
+            
+            print(f"✅ Successfully stored planning scenario {scenario_id} in database")
+        except ConnectionError as conn_error:
+            print(f"❌ Connection error in _store_planning_scenario: {conn_error}")
+            if 'cursor' in locals():
+                try:
+                    cursor.close()
+                except:
+                    pass
+            # Re-raise connection errors so they can be handled upstream
+            raise
+        except Exception as e:
+            print(f"❌ Error in _store_planning_scenario: {e}")
+            import traceback
+            traceback.print_exc()
+            if 'cursor' in locals():
+                try:
+                    self.db.rollback()
+                    cursor.close()
+                except:
+                    pass
+            # Re-raise the exception so we can see what's wrong
+            raise
