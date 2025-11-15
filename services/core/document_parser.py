@@ -68,20 +68,10 @@ class TaxDocumentParser:
                 # Check for payment/balance issues
                 if 'payment' in error_str.lower() or 'balance' in error_str.lower() or 'insufficient' in error_str.lower():
                     logger.warning(f"Landing AI account balance issue: {parse_error}")
-                    logger.info("Using fallback: creating document structure from provided metadata")
-                    # Return early with basic structure
-                    return {
-                        'form_type': form_code or 'Unknown',
-                        'tax_year': None,
-                        'taxpayer_name': '',
-                        'taxpayer_ssn': '',
-                        'filing_status': '',
-                        'form_data': {},
-                        'line_items': [],
-                        'calculations': {},
-                        'schedules': [],
-                        'extraction_note': 'Landing AI account balance insufficient. Using basic structure from provided metadata.'
-                    }
+                    logger.info("Landing AI parse failed due to account balance - will try LLM extraction from file directly")
+                    # Don't return early - continue to LLM extraction
+                    # We'll try to read the PDF and extract with LLM
+                    markdown_text = ""  # Will be populated by LLM extraction
                 
                 # If absolute path failed, try file:// protocol
                 if not (document_url.startswith('http://') or document_url.startswith('https://')):
@@ -199,12 +189,54 @@ class TaxDocumentParser:
                     logger.info(f"✅ Landing AI extracted - name: '{extracted_data['taxpayer_name']}', SSN: '{extracted_data['taxpayer_ssn']}', status: '{extracted_data['filing_status']}'")
             except Exception as extract_error:
                 error_str = str(extract_error)
-                logger.warning(f"Landing AI extract API failed: {extract_error}")
-                # Check if it's a schema validation error
-                if 'schema' in error_str.lower() or 'validation' in error_str.lower():
-                    logger.info("Schema validation error - will use LLM extraction instead")
+                # Check if it's a NoneType error (some fields returned None)
+                if "'NoneType' object has no attribute 'strip'" in str(extract_error):
+                    logger.warning(f"Landing AI extract API returned None values: {extract_error}")
+                    # Try to handle None values gracefully
+                    if isinstance(landing_ai_data, dict):
+                        # Set empty strings for None values
+                        if landing_ai_data.get('taxpayer_name') is None:
+                            extracted_data['taxpayer_name'] = ''
+                        else:
+                            extracted_data['taxpayer_name'] = str(landing_ai_data.get('taxpayer_name', '')).strip()
+                        
+                        if landing_ai_data.get('taxpayer_ssn') is None:
+                            extracted_data['taxpayer_ssn'] = ''
+                        else:
+                            extracted_data['taxpayer_ssn'] = str(landing_ai_data.get('taxpayer_ssn', '')).strip()
+                        
+                        if landing_ai_data.get('filing_status') is None:
+                            extracted_data['filing_status'] = ''
+                        else:
+                            extracted_data['filing_status'] = str(landing_ai_data.get('filing_status', '')).strip()
+                        
+                        # Store income fields even if name/SSN/status are None
+                        form_fields = {}
+                        if landing_ai_data.get('wages') is not None:
+                            form_fields['wages'] = float(landing_ai_data['wages'])
+                        if landing_ai_data.get('interest') is not None:
+                            form_fields['interest'] = float(landing_ai_data['interest'])
+                        if landing_ai_data.get('dividends') is not None:
+                            form_fields['dividends'] = float(landing_ai_data['dividends'])
+                        if landing_ai_data.get('total_income') is not None:
+                            form_fields['total_income'] = float(landing_ai_data['total_income'])
+                        
+                        if form_fields:
+                            extracted_data['form_fields_json'] = json.dumps(form_fields)
+                            logger.info(f"✅ Landing AI extracted income fields despite None values: {form_fields}")
+                        
+                        landing_ai_extracted = True
+                        logger.info(f"✅ Landing AI extracted (with None handling) - name: '{extracted_data['taxpayer_name']}', SSN: '{extracted_data['taxpayer_ssn']}', status: '{extracted_data['filing_status']}'")
+                    else:
+                        logger.warning(f"Landing AI extract API failed: {extract_error}")
+                        logger.info("Landing AI extract failed - will use LLM extraction instead")
                 else:
-                    logger.info("Landing AI extract failed - will use LLM extraction instead")
+                    logger.warning(f"Landing AI extract API failed: {extract_error}")
+                    # Check if it's a schema validation error
+                    if 'schema' in error_str.lower() or 'validation' in error_str.lower():
+                        logger.info("Schema validation error - will use LLM extraction instead")
+                    else:
+                        logger.info("Landing AI extract failed - will use LLM extraction instead")
             
             # If Landing AI extract didn't work, try LLM extraction from markdown
             if not landing_ai_extracted:
@@ -226,23 +258,49 @@ class TaxDocumentParser:
                     except:
                         pass
                 
+                # If markdown is empty (Landing AI parse failed), try to extract directly from PDF with LLM
+                if not markdown_text or len(markdown_text.strip()) < 100:
+                    logger.info("Markdown is empty or too short - attempting direct PDF extraction with LLM")
+                    try:
+                        # Try to read PDF content directly for LLM extraction
+                        import PyPDF2
+                        pdf_text = ""
+                        try:
+                            with open(pdf_path, 'rb') as pdf_file:
+                                pdf_reader = PyPDF2.PdfReader(pdf_file)
+                                for page in pdf_reader.pages:
+                                    pdf_text += page.extract_text() + "\n"
+                            markdown_text = pdf_text
+                            logger.info(f"Extracted {len(markdown_text)} chars from PDF directly")
+                        except Exception as pdf_error:
+                            logger.warning(f"Failed to read PDF directly: {pdf_error}")
+                            # Use empty markdown - LLM will still try to extract
+                    except ImportError:
+                        logger.warning("PyPDF2 not available - cannot read PDF directly")
+                
                 # Try to extract form field values from markdown using LLM (more reliable than regex)
-                logger.info(f"Markdown length: {len(markdown_text)} chars")
-                logger.info(f"Markdown preview (first 2000 chars): {markdown_text[:2000]}")
+                if markdown_text:
+                    logger.info(f"Markdown length: {len(markdown_text)} chars")
+                    logger.info(f"Markdown preview (first 2000 chars): {markdown_text[:2000]}")
+                else:
+                    logger.warning("No markdown text available for LLM extraction")
                 
                 # First try LLM extraction, then fallback to pattern matching
                 llm_extraction_attempted = False
                 try:
                     logger.info("Attempting LLM extraction...")
-                    await self._extract_fields_with_llm(markdown_text, extracted_data, form_code)
+                    await self._extract_fields_with_llm(markdown_text or "", extracted_data, form_code)
                     llm_extraction_attempted = True
                     logger.info("✅ LLM extraction completed successfully")
                 except Exception as llm_error:
                     logger.warning(f"LLM extraction failed: {llm_error}")
                     import traceback
                     logger.warning(f"LLM error traceback: {traceback.format_exc()}")
-                    logger.info("Falling back to pattern matching...")
-                    self._extract_fields_from_markdown(markdown_text, extracted_data)
+                    if markdown_text:
+                        logger.info("Falling back to pattern matching...")
+                        self._extract_fields_from_markdown(markdown_text, extracted_data)
+                    else:
+                        logger.error("Cannot use pattern matching - no markdown text available")
             else:
                 # Landing AI extraction succeeded - set extraction method
                 llm_extraction_attempted = False
@@ -261,13 +319,29 @@ class TaxDocumentParser:
                 extraction_method = 'markdown_parsing_with_pattern_matching'
                 extraction_note = 'Using markdown parsing with pattern matching to extract field values'
             
-            # Only update form_fields_json if it's not already set (from Landing AI)
-            if not landing_ai_extracted or 'form_fields_json' not in extracted_data or extracted_data['form_fields_json'] == '{}':
-                extracted_data['form_fields_json'] = json.dumps({
-                    'raw_markdown_length': len(markdown_text),
+            # Only update form_fields_json if it's not already set (from Landing AI or LLM extraction)
+            # Check if form_fields_json contains actual income data (not just metadata)
+            form_fields_json_str = extracted_data.get('form_fields_json', '{}')
+            form_fields_json_parsed = {}
+            try:
+                form_fields_json_parsed = json.loads(form_fields_json_str) if isinstance(form_fields_json_str, str) else form_fields_json_str
+            except:
+                form_fields_json_parsed = {}
+            
+            # Check if form_fields_json has income fields (wages, interest, dividends, total_income)
+            has_income_fields = any(key in form_fields_json_parsed for key in ['wages', 'interest', 'dividends', 'total_income'])
+            
+            # Only overwrite if it doesn't have income fields and wasn't set by Landing AI
+            if not landing_ai_extracted and not has_income_fields:
+                # Add metadata but preserve any existing fields
+                metadata = {
+                    'raw_markdown_length': len(markdown_text) if markdown_text else 0,
                     'extraction_method': extraction_method,
                     'note': extraction_note
-                })
+                }
+                # Merge with existing fields if any
+                form_fields_json_parsed.update(metadata)
+                extracted_data['form_fields_json'] = json.dumps(form_fields_json_parsed)
             
             # Parse form_fields_json if it's a JSON string
             form_data = {}
@@ -279,6 +353,7 @@ class TaxDocumentParser:
                     form_data = {}
             
             # Ensure all fields are present
+            # Preserve form_fields_json in result so it's stored in database
             result = {
                 'form_type': extracted_data.get('form_type', ''),
                 'tax_year': extracted_data.get('tax_year'),
@@ -286,6 +361,7 @@ class TaxDocumentParser:
                 'taxpayer_ssn': extracted_data.get('taxpayer_ssn', ''),
                 'filing_status': extracted_data.get('filing_status', ''),
                 'form_data': form_data,
+                'form_fields_json': extracted_data.get('form_fields_json', '{}'),  # Preserve form_fields_json for completeness checker
                 'line_items': extracted_data.get('line_items', []),
                 'calculations': extracted_data.get('calculations', {}) if isinstance(extracted_data.get('calculations'), dict) else {},
                 'schedules': extracted_data.get('schedules', [])

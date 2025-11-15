@@ -28,30 +28,11 @@ class FormCompletenessChecker:
         genai.configure(api_key=gemini_api_key)
         # Use model from config, fallback to gemini-1.5-pro
         from config import Config
-        model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-2.5-flash'
+        model_name = Config.GEMINI_GENERATION_MODEL or 'gemini-1.5-pro'
         # Remove 'models/' prefix if present (generation models don't use it)
         if model_name.startswith('models/'):
             model_name = model_name.replace('models/', '')
-        try:
-            self.model = genai.GenerativeModel(model_name)
-        except Exception as e:
-            print(f"⚠️  Failed to initialize {model_name}, trying gemini-2.5-flash as fallback: {e}")
-            try:
-                # Fallback to gemini-2.5-flash (stable, available)
-                self.model = genai.GenerativeModel('gemini-2.5-flash')
-                print(f"✅ Using fallback model: gemini-2.5-flash")
-            except Exception as e2:
-                print(f"⚠️  gemini-2.5-flash also failed, trying gemini-2.0-flash-001...")
-                try:
-                    self.model = genai.GenerativeModel('gemini-2.0-flash-001')
-                    print(f"✅ Using fallback model: gemini-2.0-flash-001")
-                except Exception as e3:
-                    try:
-                        self.model = genai.GenerativeModel('gemini-flash-latest')
-                        print(f"✅ Using fallback model: gemini-flash-latest")
-                    except Exception as e4:
-                        print(f"❌ All model initialization failed!")
-                        raise e
+        self.model = genai.GenerativeModel(model_name)
         
     async def check_document(
         self,
@@ -101,7 +82,7 @@ class FormCompletenessChecker:
             # 3. Run all requested checks
             all_issues = []
             check_results = {}
-            
+        
             if 'required_fields' in check_types or 'completeness' in check_types:
                 try:
                     print("📋 Checking required fields...")
@@ -720,16 +701,16 @@ FORMAT: [{{ "field_name": "...", "issue_description": "...", ... }}]
             cursor = self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             # Use embedding_str directly in SQL to avoid parameter binding issues with pgvector
             cursor.execute(f"""
-            SELECT 
-                id,
-                chunk_text,
-                section_reference,
-                document_title
-            FROM tax_laws
-            WHERE jurisdiction = %s
+                SELECT 
+                    id,
+                    chunk_text,
+                    section_reference,
+                    document_title
+                FROM tax_laws
+                WHERE jurisdiction = %s
                 AND law_category LIKE '%%filing%%'
                 ORDER BY embedding <=> '{embedding_str}'::vector
-            LIMIT 5
+                LIMIT 5
             """, (jurisdiction,))
             
             relevant_laws = cursor.fetchall()
