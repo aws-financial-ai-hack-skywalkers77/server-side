@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
+from datetime import datetime
 import os
 import logging
 from pathlib import Path
@@ -12,18 +13,118 @@ from compliance_engine import ComplianceEngine
 from document_processor import DocumentProcessor
 from vectorizer import Vectorizer
 
-# Configure logging
+# Configure logging first
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# Initialize S3 client if S3 is enabled
+s3_client = None
+if Config.S3_ENABLED:
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+        if Config.AWS_ACCESS_KEY_ID and Config.AWS_SECRET_ACCESS_KEY:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY,
+                region_name=Config.AWS_REGION
+            )
+        else:
+            s3_client = boto3.client('s3', region_name=Config.AWS_REGION)
+        logger.info("S3 client initialized")
+    except ImportError:
+        logger.warning("boto3 not installed. S3 functionality will be disabled.")
+        s3_client = None
+    except Exception as e:
+        logger.warning(f"Failed to initialize S3 client: {e}. S3 functionality will be disabled.")
+        s3_client = None
+
 origins = [
     "*"
 ]
 
 DEFAULT_BULK_LIMIT = 200
+
+
+def upload_file_content_to_s3(file_content: bytes, s3_key: str, content_type: str = "application/pdf") -> str:
+    """
+    Upload file content directly to S3 bucket from memory.
+    
+    Args:
+        file_content: File content as bytes
+        s3_key: S3 object key (path in bucket)
+        content_type: MIME type of the file (default: application/pdf)
+    
+    Returns:
+        Presigned S3 URL of the uploaded file (valid for 1 hour)
+    
+    Raises:
+        Exception: If upload fails
+    """
+    if not s3_client:
+        raise Exception("S3 client not initialized. Set S3_ENABLED=true and configure AWS credentials.")
+    if not Config.S3_BUCKET_NAME:
+        raise Exception("S3_BUCKET_NAME not configured")
+    
+    try:
+        logger.info(f"Uploading file to S3: {s3_key}")
+        s3_client.put_object(
+            Bucket=Config.S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=file_content,
+            ContentType=content_type
+        )
+        
+        # Generate presigned URL (valid for 1 hour)
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': Config.S3_BUCKET_NAME, 'Key': s3_key},
+            ExpiresIn=3600  # 1 hour
+        )
+        
+        s3_uri = f"s3://{Config.S3_BUCKET_NAME}/{s3_key}"
+        logger.info(f"Successfully uploaded file to S3: {s3_uri}")
+        logger.info(f"Presigned URL generated (valid for 1 hour)")
+        return presigned_url
+    except ClientError as e:
+        logger.error(f"Error uploading file to S3: {e}")
+        raise Exception(f"Failed to upload file to S3: {str(e)}")
+
+
+def get_presigned_url_for_s3_key(s3_key: str, expires_in: int = 10800) -> str:
+    """
+    Generate a presigned URL for an existing S3 object.
+    
+    Args:
+        s3_key: S3 object key (path in bucket)
+        expires_in: Expiration time in seconds (default: 10800 = 3 hours)
+    
+    Returns:
+        Presigned S3 URL
+    
+    Raises:
+        Exception: If URL generation fails
+    """
+    if not s3_client:
+        raise Exception("S3 client not initialized. Set S3_ENABLED=true and configure AWS credentials.")
+    if not Config.S3_BUCKET_NAME:
+        raise Exception("S3_BUCKET_NAME not configured")
+    
+    try:
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': Config.S3_BUCKET_NAME, 'Key': s3_key},
+            ExpiresIn=expires_in
+        )
+        logger.info(f"Generated presigned URL for S3 key: {s3_key} (valid for {expires_in} seconds)")
+        return presigned_url
+    except ClientError as e:
+        logger.error(f"Error generating presigned URL: {e}")
+        raise Exception(f"Failed to generate presigned URL: {str(e)}")
 
 
 app = FastAPI(title="Document Processing API", version="1.0.0")
@@ -120,6 +221,7 @@ async def get_invoices(
                 'subtotal_amount': float(invoice.get('subtotal_amount', 0)) if invoice.get('subtotal_amount') else 0.0,
                 'tax_amount': float(invoice.get('tax_amount', 0)) if invoice.get('tax_amount') else 0.0,
                 'summary': invoice.get('summary'),
+                's3_key': invoice.get('s3_key'),
                 'created_at': invoice.get('created_at').isoformat() if invoice.get('created_at') else None,
                 'updated_at': invoice.get('updated_at').isoformat() if invoice.get('updated_at') else None
             })
@@ -163,6 +265,7 @@ async def get_invoice_by_db_id(db_id: int):
             'subtotal_amount': float(invoice.get('subtotal_amount', 0)) if invoice.get('subtotal_amount') else 0.0,
             'tax_amount': float(invoice.get('tax_amount', 0)) if invoice.get('tax_amount') else 0.0,
             'summary': invoice.get('summary'),
+            's3_key': invoice.get('s3_key'),
             'created_at': invoice.get('created_at').isoformat() if invoice.get('created_at') else None,
             'updated_at': invoice.get('updated_at').isoformat() if invoice.get('updated_at') else None
         }
@@ -210,6 +313,7 @@ async def get_contracts(
                 'contract_id': contract.get('contract_id'),
                 'summary': contract.get('summary'),
                 'text': contract.get('text'),
+                's3_key': contract.get('s3_key'),
                 'created_at': contract.get('created_at').isoformat() if contract.get('created_at') else None,
                 'updated_at': contract.get('updated_at').isoformat() if contract.get('updated_at') else None
             })
@@ -258,6 +362,7 @@ async def get_contract_by_db_id(db_id: int):
             'contract_id': contract.get('contract_id'),
             'summary': contract.get('summary'),
             'text': contract.get('text'),
+            's3_key': contract.get('s3_key'),
             'created_at': contract.get('created_at').isoformat() if contract.get('created_at') else None,
             'updated_at': contract.get('updated_at').isoformat() if contract.get('updated_at') else None
         }
@@ -327,6 +432,21 @@ async def upload_document(
         
         logger.info(f"Processing document: {file.filename} (type: {document_type})")
         
+        # Upload to S3 if enabled (optional)
+        s3_key = None
+        s3_url = None
+        if Config.S3_ENABLED and s3_client:
+            try:
+                # Create S3 key with document type prefix and timestamp
+                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                s3_key = f"{doc_type}s/{timestamp}_{file.filename}"
+                s3_url = upload_file_content_to_s3(content, s3_key)
+                logger.info(f"File uploaded to S3: {s3_url}")
+            except Exception as e:
+                logger.warning(f"Failed to upload to S3: {e}. Continuing with local file storage.")
+                s3_key = None
+                s3_url = None
+        
         # Extract data using Landing AI ADE based on document type
         if doc_type == 'invoice':
             metadata = document_processor.extract_invoice_data(str(file_path))
@@ -338,7 +458,7 @@ async def upload_document(
         
         # Store in database based on document type
         if doc_type == 'invoice':
-            stored_record = db.insert_invoice(metadata, vector)
+            stored_record = db.insert_invoice(metadata, vector, s3_key=s3_key)
             invoice_db_id = stored_record.get('id')
             
             # Store line items if they were extracted
@@ -363,10 +483,15 @@ async def upload_document(
                 'tax_amount': float(stored_record.get('tax_amount', 0)) if stored_record.get('tax_amount') else 0.0,
                 'summary': stored_record.get('summary'),
                 'line_items_count': len(line_items),
+<<<<<<< Current (Your changes)
+=======
+                's3_key': stored_record.get('s3_key'),
+                's3_url': s3_url if s3_url else None,
+>>>>>>> Incoming (Background Agent changes)
                 'created_at': stored_record.get('created_at').isoformat() if stored_record.get('created_at') else None
             }
         elif doc_type == 'contract':
-            stored_record = db.insert_contract(metadata, vector)
+            stored_record = db.insert_contract(metadata, vector, s3_key=s3_key)
             logger.info(f"Successfully processed and stored contract: {metadata.get('contract_id')}")
             
             # Return contract metadata
@@ -374,6 +499,8 @@ async def upload_document(
                 'contract_id': stored_record.get('contract_id'),
                 'summary': stored_record.get('summary'),
                 'text': stored_record.get('text'),
+                's3_key': stored_record.get('s3_key'),
+                's3_url': s3_url if s3_url else None,
                 'created_at': stored_record.get('created_at').isoformat() if stored_record.get('created_at') else None
             }
         
@@ -402,6 +529,83 @@ async def upload_document(
                 logger.info(f"Cleaned up temporary file: {file_path}")
             except Exception as e:
                 logger.warning(f"Error removing temporary file: {e}")
+
+@app.get("/documents/{document_type}/{db_id}/download_url")
+async def get_document_download_url(
+    document_type: str,
+    db_id: int
+):
+    """
+    Get a presigned S3 URL for downloading a document.
+    
+    Args:
+        document_type: Type of document ('invoice' or 'contract')
+        db_id: Database ID of the document
+    
+    Returns:
+        JSON response with presigned URL (valid for 3 hours)
+    """
+    # Validate document type
+    doc_type = document_type.lower()
+    if doc_type not in ['invoice', 'contract']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Document type '{document_type}' not supported. Supported types: 'invoice', 'contract'"
+        )
+    
+    try:
+        # Get S3 key from database
+        if doc_type == 'invoice':
+            s3_key = db.get_invoice_s3_key(db_id)
+            if not s3_key:
+                # Check if invoice exists
+                invoice = db.get_invoice_by_db_id(db_id)
+                if not invoice:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Invoice with database ID '{db_id}' not found"
+                    )
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Invoice with database ID '{db_id}' has no S3 key stored"
+                )
+        else:  # contract
+            s3_key = db.get_contract_s3_key(db_id)
+            if not s3_key:
+                # Check if contract exists
+                contract = db.get_contract_by_db_id(db_id)
+                if not contract:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Contract with database ID '{db_id}' not found"
+                    )
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Contract with database ID '{db_id}' has no S3 key stored"
+                )
+        
+        # Generate presigned URL
+        presigned_url = get_presigned_url_for_s3_key(s3_key, expires_in=10800)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "document_type": doc_type,
+                "db_id": db_id,
+                "s3_key": s3_key,
+                "presigned_url": presigned_url,
+                "expires_in_seconds": 10800
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating download URL: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating download URL: {str(e)}"
+        )
 
 @app.post("/analyze_invoice/{invoice_db_id}")
 async def analyze_invoice(invoice_db_id: int):
