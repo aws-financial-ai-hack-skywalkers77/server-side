@@ -2,6 +2,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+from pdf_highlighter import PDFHighlighter
 
 
 class ComplianceEngine:
@@ -22,6 +23,7 @@ class ComplianceEngine:
         self.clause_limit = clause_limit
         self.next_run_interval_hours = next_run_interval_hours
         self.logger = logging.getLogger(__name__)
+        self.pdf_highlighter = PDFHighlighter()
 
     # -------------------------------------------------------------------------
     # Public API
@@ -44,7 +46,9 @@ class ComplianceEngine:
         invoice["line_items"] = line_items
 
         contract_contexts, clause_references = self._retrieve_contract_context(invoice)
-        if not contract_contexts:
+        no_contracts_found = not contract_contexts
+        
+        if no_contracts_found:
             self.logger.warning(
                 "No contract clauses retrieved for invoice '%s'", invoice.get("invoice_id")
             )
@@ -83,6 +87,48 @@ class ComplianceEngine:
             invoice_db_id=invoice.get("id"),
             status=status,
         )
+
+        # Always return an S3 URL - highlighted if contracts found and violations exist, original otherwise
+        s3_url = None
+        try:
+            # Get S3 key for the invoice
+            s3_key = self.db.get_invoice_s3_key(invoice.get("id"))
+            if s3_key:
+                # If no contracts found, return original PDF
+                if no_contracts_found:
+                    s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
+                    self.logger.info(f"No contracts found, returning original PDF S3 URL: {s3_url}")
+                else:
+                    # Contracts found - highlight PDF if violations exist, otherwise return original
+                    s3_url = self.pdf_highlighter.process_invoice_pdf(
+                        s3_key=s3_key,
+                        violations=violations
+                    )
+                    if s3_url:
+                        if violations:
+                            self.logger.info(f"Generated highlighted PDF S3 URL: {s3_url}")
+                        else:
+                            self.logger.info(f"No violations found, returning original PDF S3 URL: {s3_url}")
+                    else:
+                        self.logger.warning("PDF processing returned None, falling back to original")
+                        s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
+            else:
+                self.logger.warning(f"No S3 key found for invoice {invoice.get('id')}, skipping S3 URL generation")
+        except Exception as e:
+            # Don't fail the entire compliance process if PDF processing fails
+            self.logger.error(f"Error generating S3 URL: {e}", exc_info=True)
+            # Try to return original PDF as fallback
+            try:
+                s3_key = self.db.get_invoice_s3_key(invoice.get("id"))
+                if s3_key:
+                    s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
+                    self.logger.info(f"Using original PDF S3 URL as fallback: {s3_url}")
+            except Exception as fallback_error:
+                self.logger.error(f"Failed to get original PDF S3 URL as fallback: {fallback_error}")
+        
+        # Add S3 URL to report (always include if available)
+        if s3_url:
+            report["s3_url"] = s3_url
 
         return report
 
