@@ -665,9 +665,27 @@ class ComplianceEngine:
         """
         description = line_item.get("description", "N/A")
         service_code = line_item.get("service_code", "")
+        
+        # Convert Decimal types to float for calculations
         quantity = line_item.get("quantity", 1)
+        try:
+            quantity = float(quantity or 1)
+        except (TypeError, ValueError):
+            quantity = 1.0
+        
         unit_price = line_item.get("unit_price")
+        if unit_price is not None:
+            try:
+                unit_price = float(unit_price)
+            except (TypeError, ValueError):
+                unit_price = None
+        
         total_price = line_item.get("total_price")
+        if total_price is not None:
+            try:
+                total_price = float(total_price)
+            except (TypeError, ValueError):
+                total_price = None
         
         rule_notes = rule.get("notes", "")
         clause_ref = rule.get("clause_reference", "")
@@ -754,13 +772,21 @@ class ComplianceEngine:
     def _calculate_actual_price(self, line_item: Dict[str, Any]) -> Optional[float]:
         total_price = line_item.get("total_price")
         if total_price is not None:
-            return float(total_price)
+            try:
+                return float(total_price)
+            except (TypeError, ValueError):
+                pass
+        
         quantity = line_item.get("quantity", 1)
         unit_price = line_item.get("unit_price")
         if unit_price is None:
             return None
+        
         try:
-            return float(unit_price) * float(quantity or 1)
+            # Convert both to float to handle Decimal types from database
+            quantity_float = float(quantity or 1)
+            unit_price_float = float(unit_price)
+            return unit_price_float * quantity_float
         except (TypeError, ValueError):
             return None
 

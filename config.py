@@ -42,3 +42,10 @@ class Config:
     S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
     S3_ENABLED = os.getenv("S3_ENABLED", "false").lower() == "true"
 
+    # AWS S3 Configuration (optional - for storing uploaded files)
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+    AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+    S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+    S3_ENABLED = os.getenv("S3_ENABLED", "false").lower() == "true"
+
