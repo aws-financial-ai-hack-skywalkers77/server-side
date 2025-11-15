@@ -212,14 +212,27 @@ async def get_invoices(
         # Format response
         formatted_invoices = []
         for invoice in invoices:
+            # Convert Decimal types to float for JSON serialization
+            subtotal = invoice.get('subtotal_amount')
+            try:
+                subtotal = float(subtotal) if subtotal is not None else 0.0
+            except (TypeError, ValueError):
+                subtotal = 0.0
+            
+            tax = invoice.get('tax_amount')
+            try:
+                tax = float(tax) if tax is not None else 0.0
+            except (TypeError, ValueError):
+                tax = 0.0
+            
             formatted_invoices.append({
                 'id': invoice.get('id'),
                 'invoice_id': invoice.get('invoice_id'),
                 'seller_name': invoice.get('seller_name'),
                 'seller_address': invoice.get('seller_address'),
                 'tax_id': invoice.get('tax_id'),
-                'subtotal_amount': float(invoice.get('subtotal_amount', 0)) if invoice.get('subtotal_amount') else 0.0,
-                'tax_amount': float(invoice.get('tax_amount', 0)) if invoice.get('tax_amount') else 0.0,
+                'subtotal_amount': subtotal,
+                'tax_amount': tax,
                 'summary': invoice.get('summary'),
                 's3_key': invoice.get('s3_key'),
                 'created_at': invoice.get('created_at').isoformat() if invoice.get('created_at') else None,
@@ -256,14 +269,27 @@ async def get_invoice_by_db_id(db_id: int):
             )
         
         # Format response
+        # Convert Decimal types to float for JSON serialization
+        subtotal = invoice.get('subtotal_amount')
+        try:
+            subtotal = float(subtotal) if subtotal is not None else 0.0
+        except (TypeError, ValueError):
+            subtotal = 0.0
+        
+        tax = invoice.get('tax_amount')
+        try:
+            tax = float(tax) if tax is not None else 0.0
+        except (TypeError, ValueError):
+            tax = 0.0
+        
         response_metadata = {
             'db_id': invoice.get('id'),
             'invoice_id': invoice.get('invoice_id'),
             'seller_name': invoice.get('seller_name'),
             'seller_address': invoice.get('seller_address'),
             'tax_id': invoice.get('tax_id'),
-            'subtotal_amount': float(invoice.get('subtotal_amount', 0)) if invoice.get('subtotal_amount') else 0.0,
-            'tax_amount': float(invoice.get('tax_amount', 0)) if invoice.get('tax_amount') else 0.0,
+            'subtotal_amount': subtotal,
+            'tax_amount': tax,
             'summary': invoice.get('summary'),
             's3_key': invoice.get('s3_key'),
             'created_at': invoice.get('created_at').isoformat() if invoice.get('created_at') else None,
@@ -474,13 +500,26 @@ async def upload_document(
             logger.info(f"Successfully processed and stored invoice: {metadata.get('invoice_id')}")
             
             # Return invoice metadata
+            # Convert Decimal types to float for JSON serialization
+            subtotal = stored_record.get('subtotal_amount')
+            try:
+                subtotal = float(subtotal) if subtotal is not None else 0.0
+            except (TypeError, ValueError):
+                subtotal = 0.0
+            
+            tax = stored_record.get('tax_amount')
+            try:
+                tax = float(tax) if tax is not None else 0.0
+            except (TypeError, ValueError):
+                tax = 0.0
+            
             response_metadata = {
                 'invoice_id': stored_record.get('invoice_id'),
                 'seller_name': stored_record.get('seller_name'),
                 'seller_address': stored_record.get('seller_address'),
                 'tax_id': stored_record.get('tax_id'),
-                'subtotal_amount': float(stored_record.get('subtotal_amount', 0)) if stored_record.get('subtotal_amount') else 0.0,
-                'tax_amount': float(stored_record.get('tax_amount', 0)) if stored_record.get('tax_amount') else 0.0,
+                'subtotal_amount': subtotal,
+                'tax_amount': tax,
                 'summary': stored_record.get('summary'),
                 'line_items_count': len(line_items),
                 's3_key': stored_record.get('s3_key'),
