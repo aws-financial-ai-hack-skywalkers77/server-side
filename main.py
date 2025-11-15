@@ -483,11 +483,8 @@ async def upload_document(
                 'tax_amount': float(stored_record.get('tax_amount', 0)) if stored_record.get('tax_amount') else 0.0,
                 'summary': stored_record.get('summary'),
                 'line_items_count': len(line_items),
-<<<<<<< Current (Your changes)
-=======
                 's3_key': stored_record.get('s3_key'),
                 's3_url': s3_url if s3_url else None,
->>>>>>> Incoming (Background Agent changes)
                 'created_at': stored_record.get('created_at').isoformat() if stored_record.get('created_at') else None
             }
         elif doc_type == 'contract':
