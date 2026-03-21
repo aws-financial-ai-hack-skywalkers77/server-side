@@ -273,11 +273,17 @@ class Database:
             logger.error(f"Error retrieving invoice line items: {e}")
             raise
 
-    def get_invoice_with_line_items(self, invoice_identifier):
+    def get_invoice_with_line_items(self, invoice_identifier, identifier_is_db_id=False):
         """
-        Fetch an invoice and its line items by invoice_id (external identifier).
+        Fetch an invoice and its line items.
+        Args:
+            invoice_identifier: invoice_id (string) or database id (int based on identifier_is_db_id flag)
+            identifier_is_db_id: when True, treat invoice_identifier as invoices.id
         """
-        invoice = self.get_invoice_by_id(invoice_identifier)
+        if identifier_is_db_id:
+            invoice = self.get_invoice_by_db_id(invoice_identifier)
+        else:
+            invoice = self.get_invoice_by_id(invoice_identifier)
         if not invoice:
             return None
         line_items = self.get_invoice_line_items(invoice.get('id'))

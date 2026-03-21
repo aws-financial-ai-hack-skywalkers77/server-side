@@ -383,13 +383,13 @@ async def upload_document(
             except Exception as e:
                 logger.warning(f"Error removing temporary file: {e}")
 
-@app.post("/analyze_invoice/{invoice_id}")
-async def analyze_invoice(invoice_id: str):
+@app.post("/analyze_invoice/{invoice_db_id}")
+async def analyze_invoice(invoice_db_id: int):
     """
     Trigger contract compliance analysis for a single invoice.
     """
     try:
-        report = compliance_engine.analyze_invoice(invoice_id)
+        report = compliance_engine.analyze_invoice(invoice_db_id)
         return JSONResponse(
             status_code=200,
             content=report
@@ -401,10 +401,10 @@ async def analyze_invoice(invoice_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error analyzing invoice '{invoice_id}': {e}", exc_info=True)
+        logger.error(f"Error analyzing invoice with database ID '{invoice_db_id}': {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Error analyzing invoice '{invoice_id}': {str(e)}"
+            detail=f"Error analyzing invoice with database ID '{invoice_db_id}': {str(e)}"
         )
 
 @app.post("/analyze_invoices_bulk")
