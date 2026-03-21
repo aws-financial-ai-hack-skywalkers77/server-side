@@ -36,11 +36,11 @@ class ComplianceEngine:
             raise ValueError(f"Invoice with database ID '{invoice_db_id}' not found")
 
         line_items = invoice.get("line_items", [])
+        line_item_source = "stored"
         if not line_items:
-            raise ValueError(
-                f"No line items stored for invoice database ID '{invoice_db_id}'. "
-                "Compliance analysis requires line item data."
-            )
+            line_items = self._build_fallback_line_items(invoice)
+            line_item_source = "inferred"
+        invoice["line_items"] = line_items
 
         contract_contexts, clause_references = self._retrieve_contract_context(invoice)
         if not contract_contexts:
@@ -63,6 +63,7 @@ class ComplianceEngine:
             "processed_at": processed_at,
             "violations": violations,
             "evaluation_summary": evaluation_summary,
+            "line_item_source": line_item_source,
             "contract_clauses": clause_references,
             "next_run_scheduled_in_hours": self.next_run_interval_hours,
         }
@@ -167,6 +168,55 @@ class ComplianceEngine:
     # -------------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------------
+    def _build_fallback_line_items(self, invoice: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Create synthetic line items when none are stored.
+        Uses invoice summary and subtotal/tax to approximate a single charge.
+        """
+        subtotal_amount = invoice.get("subtotal_amount")
+        tax_amount = invoice.get("tax_amount")
+
+        try:
+            subtotal_value = float(subtotal_amount) if subtotal_amount is not None else None
+        except (TypeError, ValueError):
+            subtotal_value = None
+
+        try:
+            tax_value = float(tax_amount) if tax_amount is not None else 0.0
+        except (TypeError, ValueError):
+            tax_value = 0.0
+
+        if subtotal_value is None:
+            self.logger.warning(
+                "Invoice '%s' missing subtotal_amount; unable to infer line items.",
+                invoice.get("invoice_id"),
+            )
+            return []
+
+        description = invoice.get("summary") or "Invoice total"
+        synthetic_line = {
+            "line_id": f"{invoice.get('invoice_id')}_total",
+            "description": description,
+            "service_code": None,
+            "quantity": 1,
+            "unit_price": subtotal_value,
+            "total_price": subtotal_value + tax_value,
+            "metadata": {
+                "source": "synthetic",
+                "subtotal_amount": subtotal_value,
+                "tax_amount": tax_value,
+            },
+        }
+
+        self.logger.info(
+            "Generated synthetic line item for invoice '%s' using subtotal=%s tax=%s",
+            invoice.get("invoice_id"),
+            subtotal_value,
+            tax_value,
+        )
+
+        return [synthetic_line]
+
     def _retrieve_contract_context(
         self, invoice: Dict[str, Any]
     ) -> (List[str], List[Dict[str, Any]]):

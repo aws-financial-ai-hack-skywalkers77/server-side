@@ -141,6 +141,10 @@ Trigger compliance analysis for a specific invoice (identified by its database I
 - Runs pgvector similarity search to fetch relevant contract clauses
 - Uses Gemini (RAG) to infer pricing rules from the contract
 - Applies a deterministic rule engine to flag overcharges or policy violations
+<<<<<<< Current (Your changes)
+=======
+- If an invoice has no stored line items, the engine infers a synthetic line item using the invoice subtotal/tax so the workflow still completes (reported via `line_item_source: "inferred"`).
+>>>>>>> Incoming (Background Agent changes)
 
 **Example Response:**
 ```json
