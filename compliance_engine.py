@@ -129,6 +129,41 @@ class ComplianceEngine:
 
         return summary
 
+    def analyze_invoices_explicit(self, invoice_db_ids: List[int]) -> Dict[str, Any]:
+        """
+        Analyze a caller-supplied list of invoice database IDs.
+        Returns per-invoice reports and any failures encountered.
+        """
+        reports: List[Dict[str, Any]] = []
+        failures: List[Dict[str, Any]] = []
+
+        for invoice_db_id in invoice_db_ids:
+            try:
+                report = self.analyze_invoice(invoice_db_id)
+                reports.append(report)
+            except Exception as exc:  # pylint: disable=broad-except
+                invoice_label = f"invoice_db_id={invoice_db_id}"
+                self.logger.error(
+                    "Compliance analysis failed for %s: %s",
+                    invoice_label,
+                    exc,
+                    exc_info=True,
+                )
+                failures.append(
+                    {
+                        "invoice_db_id": invoice_db_id,
+                        "error": str(exc),
+                    }
+                )
+
+        return {
+            "status": "processed",
+            "processed": len(reports),
+            "failed": len(failures),
+            "reports": reports,
+            "errors": failures if failures else [],
+        }
+
     # -------------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------------

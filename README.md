@@ -169,6 +169,33 @@ curl -X POST "http://localhost:8001/analyze_invoice/123" \
 
 `123` is the invoices table primary key. Use `GET /invoices` to discover IDs if needed.
 
+### Analyze Multiple Invoices (Explicit List)
+
+**POST** `/analyze_invoices`
+
+Submit a list of invoice database IDs to evaluate in one call.
+
+**Request Body:**
+```json
+{
+  "invoice_ids": [123, 456, 789]
+}
+```
+
+**Example Response:**
+```json
+{
+  "status": "processed",
+  "processed": 3,
+  "failed": 0,
+  "reports": [
+    { "...single-invoice report..." },
+    { "...single-invoice report..." }
+  ],
+  "errors": []
+}
+```
+
 ### Analyze Invoices (Bulk Compliance)
 
 **POST** `/analyze_invoices_bulk`

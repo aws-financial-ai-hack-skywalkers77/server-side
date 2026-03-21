@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 import os
 import logging
 from pathlib import Path
@@ -49,6 +49,13 @@ class BulkComplianceRequest(BaseModel):
         ge=1,
         le=1000,
         description="Maximum number of invoices to process during this bulk run",
+    )
+
+class InvoiceListRequest(BaseModel):
+    invoice_ids: List[int] = Field(
+        ...,
+        description="List of invoice database IDs to analyze",
+        min_items=1,
     )
 
 # Initialize components
@@ -405,6 +412,26 @@ async def analyze_invoice(invoice_db_id: int):
         raise HTTPException(
             status_code=500,
             detail=f"Error analyzing invoice with database ID '{invoice_db_id}': {str(e)}"
+        )
+
+@app.post("/analyze_invoices")
+async def analyze_invoices(request: InvoiceListRequest = Body(...)):
+    """
+    Trigger compliance analysis for a list of invoice database IDs.
+    """
+    try:
+        summary = compliance_engine.analyze_invoices_explicit(request.invoice_ids)
+        return JSONResponse(
+            status_code=200,
+            content=summary
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error analyzing invoices '{request.invoice_ids}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing invoices: {str(e)}"
         )
 
 @app.post("/analyze_invoices_bulk")
