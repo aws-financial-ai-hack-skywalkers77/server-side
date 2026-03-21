@@ -176,6 +176,7 @@ async def get_contracts(
                 'id': contract.get('id'),
                 'contract_id': contract.get('contract_id'),
                 'summary': contract.get('summary'),
+                'text': contract.get('text'),
                 'created_at': contract.get('created_at').isoformat() if contract.get('created_at') else None,
                 'updated_at': contract.get('updated_at').isoformat() if contract.get('updated_at') else None
             })
@@ -223,6 +224,7 @@ async def get_contract_by_id(contract_id: str):
             'id': contract.get('id'),
             'contract_id': contract.get('contract_id'),
             'summary': contract.get('summary'),
+            'text': contract.get('text'),
             'created_at': contract.get('created_at').isoformat() if contract.get('created_at') else None,
             'updated_at': contract.get('updated_at').isoformat() if contract.get('updated_at') else None
         }
@@ -325,6 +327,7 @@ async def upload_document(
             response_metadata = {
                 'contract_id': stored_record.get('contract_id'),
                 'summary': stored_record.get('summary'),
+                'text': stored_record.get('text'),
                 'created_at': stored_record.get('created_at').isoformat() if stored_record.get('created_at') else None
             }
         

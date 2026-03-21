@@ -65,6 +65,7 @@ class Database:
                     CREATE TABLE IF NOT EXISTS contracts (
                         id SERIAL PRIMARY KEY,
                         contract_id VARCHAR(255),
+                        text TEXT,
                         summary TEXT,
                         vector vector({vector_dim}),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -211,13 +212,14 @@ class Database:
                 
                 insert_query = """
                     INSERT INTO contracts (
-                        contract_id, summary, vector
-                    ) VALUES (%s, %s, %s::vector)
-                    RETURNING id, contract_id, summary, created_at;
+                        contract_id, summary, text, vector
+                    ) VALUES (%s, %s, %s, %s::vector)
+                    RETURNING id, contract_id, summary, text, created_at;
                 """
                 cur.execute(insert_query, (
                     metadata.get('contract_id'),
                     metadata.get('summary'),
+                    metadata.get('text'),
                     vector_str
                 ))
                 result = cur.fetchone()
@@ -234,7 +236,7 @@ class Database:
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, contract_id, summary, created_at, updated_at
+                    SELECT id, contract_id, summary, text, created_at, updated_at
                     FROM contracts
                     WHERE contract_id = %s
                     LIMIT 1;
@@ -254,7 +256,7 @@ class Database:
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, contract_id, summary, created_at, updated_at
+                    SELECT id, contract_id, summary, text, created_at, updated_at
                     FROM contracts
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s;

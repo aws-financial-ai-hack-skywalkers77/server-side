@@ -40,6 +40,9 @@ class Vectorizer:
             # Handle contract metadata
             if metadata.get('contract_id'):
                 text_parts.append(f"Contract ID: {metadata['contract_id']}")
+            if metadata.get('text'):
+                # Include contract text (may be long, but that's okay for embeddings)
+                text_parts.append(f"Text: {metadata['text']}")
             
             # Summary is common to both
             if metadata.get('summary'):

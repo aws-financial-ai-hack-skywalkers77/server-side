@@ -49,9 +49,13 @@ class DocumentProcessor:
                     "summary": {
                         "type": "string",
                         "description": "A brief summary or description of the contract"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The full text of the contract"
                     }
                 },
-                "required": ["contract_id", "summary"]
+                "required": ["contract_id", "summary", "text"]
             }
             
             schema_json = json.dumps(schema)
@@ -71,7 +75,8 @@ class DocumentProcessor:
             # Ensure all fields are present with defaults
             metadata = {
                 'contract_id': extracted_data.get('contract_id', ''),
-                'summary': extracted_data.get('summary', '')
+                'summary': extracted_data.get('summary', ''),
+                'text': extracted_data.get('text', '')
             }
             
             logger.info(f"Successfully extracted contract data: {metadata.get('contract_id')}")
