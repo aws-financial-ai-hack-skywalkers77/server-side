@@ -286,73 +286,148 @@ Please provide a clear, accurate answer based on the contract excerpts above. If
         if not contract_contexts:
             return {"rules": [], "notes": "No contract context provided"}
 
-        invoice_details = []
-        if invoice_metadata.get("seller_name"):
-            invoice_details.append(f"Vendor: {invoice_metadata['seller_name']}")
-        if invoice_metadata.get("invoice_id"):
-            invoice_details.append(f"Invoice ID: {invoice_metadata['invoice_id']}")
-        if invoice_metadata.get("summary"):
-            invoice_details.append(f"Summary: {invoice_metadata['summary']}")
-
+        # Build detailed invoice line items for matching
+        invoice_line_items = []
         if invoice_metadata.get("line_items"):
-            for item in invoice_metadata["line_items"][:5]:
-                line_desc = item.get("description") or ""
+            for idx, item in enumerate(invoice_metadata["line_items"][:10], 1):
+                line_id = item.get("line_id") or f"L-{idx:03d}"
+                description = item.get("description") or ""
+                service_code = item.get("service_code") or ""
+                quantity = item.get("quantity", 1)
                 unit_price = item.get("unit_price")
-                quantity = item.get("quantity")
-                invoice_details.append(
-                    f"Line Item: {line_desc}; unit_price={unit_price}; quantity={quantity}"
-                )
+                total_price = item.get("total_price")
+                
+                line_str = f"Line {line_id}: {description}"
+                if service_code:
+                    line_str += f" (Service Code: {service_code})"
+                line_str += f" | Quantity: {quantity} | Unit Price: ${unit_price} | Total: ${total_price}"
+                invoice_line_items.append(line_str)
+        else:
+            # Fallback for inferred line items
+            subtotal = invoice_metadata.get("subtotal_amount", 0)
+            if subtotal:
+                invoice_line_items.append(f"Line L-001: Invoice Total | Quantity: 1 | Unit Price: ${subtotal} | Total: ${subtotal}")
 
-        context = "\n\n---\n\n".join(contract_contexts)
-        invoice_block = "\n".join(invoice_details)
+        # Format contract contexts with clear separators
+        formatted_contexts = []
+        for idx, ctx in enumerate(contract_contexts[:5], 1):
+            # Truncate very long contexts to focus on pricing clauses
+            max_length = 2000
+            if len(ctx) > max_length:
+                ctx = ctx[:max_length] + "... [truncated]"
+            formatted_contexts.append(f"=== CONTRACT CLAUSE {idx} ===\n{ctx}\n")
 
-        prompt = f"""
-You are a contract compliance analyst. Use the contract clauses below to derive pricing rules that should be enforced against the provided invoice context. Return your findings strictly as JSON.
+        context_block = "\n\n".join(formatted_contexts)
+        invoice_block = "\n".join(invoice_line_items) if invoice_line_items else "No line items available"
 
-Contract Clauses:
-{context}
+        # Enhanced prompt with examples and explicit instructions
+        prompt = f"""You are an expert contract compliance analyst. Your task is to extract PRECISE pricing rules from the contract clauses below that apply to the invoice line items.
 
-Invoice Context:
-{invoice_block}
+CRITICAL INSTRUCTIONS:
+1. Extract ALL pricing limits, caps, rates, and fees mentioned in the contract clauses
+2. Match each invoice line item to relevant contract pricing rules
+3. Extract EXACT NUMERIC VALUES (dollars, percentages, quantities) from the contract
+4. If a contract mentions "$120 per tree" or "maximum $120 per unit", extract unit_price: 120
+5. If a contract mentions "not to exceed $250" or "capped at $250", extract price_cap: 250
+6. Include service codes, keywords, or descriptions that help match invoice lines to rules
+7. Be aggressive in finding pricing constraints - look for words like "maximum", "cap", "limit", "not to exceed", "shall not exceed", "up to", "per unit", "per hour", etc.
 
-Return JSON with the following structure:
+EXAMPLE OUTPUT:
+If contract says: "Routine tree pruning services shall be billed at a rate not to exceed $120 per tree. Emergency services may include a mobilization surcharge not to exceed $250."
+And invoice has: "Line L-001: Willow tree pruning (12 trees @ $150 each)"
+
+You should extract:
 {{
   "rules": [
     {{
-      "service_code": "optional code that identifies the service",
-      "keywords": ["list", "of", "phrases"] optional,
+      "keywords": ["tree pruning", "pruning", "routine"],
+      "unit_price": 120,
+      "price_cap": 120,
+      "violation_type": "Unit Price Exceeds Contract Cap",
+      "clause_reference": "Section 4.2 - Routine Services Pricing",
+      "notes": "Contract caps routine pruning at $120/tree"
+    }},
+    {{
+      "keywords": ["emergency", "mobilization", "surcharge"],
+      "price_cap": 250,
+      "violation_type": "Mobilization Surcharge Exceeds Cap",
+      "clause_reference": "Section 4.3 - Emergency Services",
+      "notes": "Emergency mobilization surcharge capped at $250"
+    }}
+  ],
+  "rationale": "Extracted unit price cap of $120/tree for routine pruning and $250 cap for emergency mobilization from contract clauses."
+}}
+
+CONTRACT CLAUSES:
+{context_block}
+
+INVOICE LINE ITEMS TO EVALUATE:
+{invoice_block}
+
+Now extract pricing rules from the contract clauses that apply to these invoice line items. Return ONLY valid JSON in this exact format:
+{{
+  "rules": [
+    {{
+      "service_code": "string or null - service identifier if mentioned",
+      "keywords": ["array", "of", "matching", "terms"],
       "unit_price": number or null,
       "price_cap": number or null,
       "flat_fee": number or null,
-      "tolerance_amount": number optional,
-      "tolerance_percent": number optional,
-      "violation_type": "string describing the violation if exceeded",
-      "clause_reference": "Contract section or clause identifier",
-      "notes": "Optional clarifying notes"
+      "tolerance_amount": number or null,
+      "tolerance_percent": number or null,
+      "violation_type": "string describing what violation occurs if exceeded",
+      "clause_reference": "string - section/clause identifier from contract",
+      "notes": "string - brief explanation"
     }}
   ],
-  "rationale": "Brief explanation of how the rules were derived"
+  "rationale": "string - explanation of extracted rules"
 }}
 
-Do not include any additional text outside of the JSON payload.
-"""
+IMPORTANT: Return ONLY the JSON object. No markdown, no code blocks, no explanations outside the JSON."""
 
         model, model_name = self._get_generative_model()
 
         logger.info("Requesting pricing rules from Gemini model '%s'", model_name)
-        response = model.generate_content(prompt)
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.1,  # Lower temperature for more consistent extraction
+                    "top_p": 0.8,
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Error with generation_config, trying without: {e}")
+            response = model.generate_content(prompt)
+        
         raw_text = self._extract_text_from_response(response)
+        
+        # Clean up common JSON extraction issues
+        raw_text = raw_text.strip()
+        # Remove markdown code blocks if present
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.startswith("```"):
+            raw_text = raw_text[3:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+        raw_text = raw_text.strip()
 
         try:
             parsed = json.loads(raw_text)
             if "rules" not in parsed:
                 parsed["rules"] = []
+            # Validate and log extracted rules
+            logger.info(f"Extracted {len(parsed.get('rules', []))} pricing rules from contract")
+            for rule in parsed.get("rules", []):
+                logger.debug(f"Rule: {rule.get('keywords', [])} -> unit_price={rule.get('unit_price')}, price_cap={rule.get('price_cap')}")
             return parsed
         except json.JSONDecodeError as decode_error:
             logger.error("Failed to parse pricing rules JSON: %s", decode_error)
+            logger.error("Raw response (first 500 chars): %s", raw_text[:500])
             return {
                 "rules": [],
                 "notes": f"Failed to parse pricing rules JSON: {decode_error}",
-                "raw_response": raw_text,
+                "raw_response": raw_text[:1000],  # Store first 1000 chars for debugging
             }
 

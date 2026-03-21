@@ -339,6 +339,18 @@ async def upload_document(
         # Store in database based on document type
         if doc_type == 'invoice':
             stored_record = db.insert_invoice(metadata, vector)
+            invoice_db_id = stored_record.get('id')
+            
+            # Store line items if they were extracted
+            line_items = metadata.get('line_items', [])
+            if line_items and invoice_db_id:
+                try:
+                    db.insert_invoice_line_items(invoice_db_id, line_items)
+                    logger.info(f"Stored {len(line_items)} line items for invoice: {metadata.get('invoice_id')}")
+                except Exception as e:
+                    logger.warning(f"Failed to store line items for invoice {metadata.get('invoice_id')}: {e}")
+                    # Don't fail the entire upload if line items fail
+            
             logger.info(f"Successfully processed and stored invoice: {metadata.get('invoice_id')}")
             
             # Return invoice metadata
@@ -350,6 +362,7 @@ async def upload_document(
                 'subtotal_amount': float(stored_record.get('subtotal_amount', 0)) if stored_record.get('subtotal_amount') else 0.0,
                 'tax_amount': float(stored_record.get('tax_amount', 0)) if stored_record.get('tax_amount') else 0.0,
                 'summary': stored_record.get('summary'),
+                'line_items_count': len(line_items),
                 'created_at': stored_record.get('created_at').isoformat() if stored_record.get('created_at') else None
             }
         elif doc_type == 'contract':

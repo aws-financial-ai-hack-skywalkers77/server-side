@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -65,6 +66,7 @@ class ComplianceEngine:
             "evaluation_summary": evaluation_summary,
             "line_item_source": line_item_source,
             "contract_clauses": clause_references,
+            "pricing_rules": pricing_rules,  # Include extracted pricing rules
             "next_run_scheduled_in_hours": self.next_run_interval_hours,
         }
 
@@ -235,46 +237,188 @@ class ComplianceEngine:
             )
             raise
 
+        # Get vendor name from invoice for strict filtering
+        vendor_name = invoice.get("seller_name")
+        
         contract_matches = self.db.search_contracts_by_similarity(
             query_vector=query_vector,
             limit=self.clause_limit,
-            similarity_threshold=0.1,
+            similarity_threshold=0.3,  # Increased from 0.1 to get more relevant matches
+            vendor_name=vendor_name,  # Hard filter: only contracts for this vendor
         )
+        
+        if vendor_name and len(contract_matches) == 0:
+            self.logger.warning(
+                "No contracts found for vendor '%s' matching invoice '%s'. "
+                "Compliance analysis will proceed with no contract context.",
+                vendor_name,
+                invoice.get("invoice_id")
+            )
         contexts: List[str] = []
         clause_references: List[Dict[str, Any]] = []
+        
+        # Normalize vendor name for post-filtering check
+        vendor_normalized = None
+        if vendor_name:
+            vendor_normalized = vendor_name.strip().lower()
+            # Remove common business suffixes for matching
+            for suffix in [' inc.', ' inc', '. inc', ' llc', ' ltd.', ' ltd', ' corporation', ' corp.', ' corp']:
+                if vendor_normalized.endswith(suffix):
+                    vendor_normalized = vendor_normalized[:-len(suffix)].strip()
+                    break
 
         for match in contract_matches:
-            context = match.get("text") or match.get("summary")
-            if not context:
+            # Hard filter: Check vendor_name field first (most reliable), then text
+            if vendor_normalized:
+                vendor_name_field = (match.get("vendor_name") or "").lower()
+                context_text = (match.get("text") or "").lower()
+                contract_id_lower = (match.get("contract_id") or "").lower()
+                
+                # Check vendor_name field, text, or contract_id
+                if (vendor_normalized not in vendor_name_field and 
+                    vendor_normalized not in context_text and 
+                    vendor_normalized not in contract_id_lower):
+                    self.logger.warning(
+                        "Skipping contract '%s' - vendor name '%s' not found. "
+                        "This contract will not be used for compliance analysis.",
+                        match.get("contract_id"),
+                        vendor_name
+                    )
+                    continue
+            
+            # Priority 1: Use structured pricing clauses if available
+            clauses = match.get("clauses")
+            pricing_clauses = []
+            if clauses:
+                # Handle JSONB - might be string or already parsed
+                if isinstance(clauses, str):
+                    try:
+                        clauses = json.loads(clauses)
+                    except (json.JSONDecodeError, TypeError):
+                        clauses = None
+                
+                if clauses and isinstance(clauses, list):
+                    # Filter for pricing-type clauses first
+                    for clause in clauses:
+                        if isinstance(clause, dict):
+                            clause_type = clause.get("clause_type", "").lower()
+                            clause_text = clause.get("clause_text", "")
+                            if clause_type == "pricing" and clause_text:
+                                pricing_clauses.append({
+                                    "clause_id": clause.get("clause_id", ""),
+                                    "section_title": clause.get("section_title", ""),
+                                    "clause_text": clause_text
+                                })
+            
+            # Priority 2: Use pricing_sections field if available
+            pricing_sections = match.get("pricing_sections", "")
+            
+            # Priority 3: Fallback to full text
+            full_text = match.get("text", "")
+            summary = match.get("summary", "")
+            
+            # Build context: prefer structured data, fallback to full text
+            if pricing_clauses:
+                # Use structured pricing clauses
+                for clause in pricing_clauses[:3]:  # Limit to top 3 pricing clauses
+                    clause_context = f"=== {clause.get('clause_id', 'Pricing Clause')} ===\n"
+                    if clause.get("section_title"):
+                        clause_context += f"Section: {clause['section_title']}\n"
+                    clause_context += f"{clause['clause_text']}\n"
+                    contexts.append(clause_context)
+                    self.logger.debug(f"Using structured pricing clause: {clause.get('clause_id')}")
+            elif pricing_sections:
+                # Use pricing_sections field
+                contexts.append(f"=== PRICING SECTIONS ===\n{pricing_sections}\n")
+                self.logger.debug("Using pricing_sections field")
+            elif full_text:
+                # Fallback to full text (truncate if too long)
+                max_length = 3000
+                if len(full_text) > max_length:
+                    contexts.append(full_text[:max_length] + "... [truncated]")
+                else:
+                    contexts.append(full_text)
+                self.logger.debug("Using full contract text (no structured clauses available)")
+            elif summary:
+                # Last resort: use summary
+                contexts.append(summary)
+                self.logger.debug("Using contract summary (no other content available)")
+            else:
+                # Skip if no content available
                 continue
-            contexts.append(context)
+            
             similarity = match.get("similarity")
             try:
                 similarity_value = float(similarity) if similarity is not None else None
             except (TypeError, ValueError):
                 similarity_value = None
+            
+            # Include service types in reference for better traceability
+            service_types = match.get("service_types", [])
+            # Handle JSONB - might be string or already parsed
+            if isinstance(service_types, str):
+                try:
+                    service_types = json.loads(service_types)
+                except (json.JSONDecodeError, TypeError):
+                    service_types = []
+            
+            context_source = "clauses" if pricing_clauses else ("pricing_sections" if pricing_sections else "full_text")
+            
             clause_references.append(
                 {
                     "contract_id": match.get("contract_id"),
+                    "vendor_name": match.get("vendor_name"),
                     "similarity": similarity_value,
+                    "service_types": service_types if isinstance(service_types, list) else [],
+                    "context_source": context_source,
                 }
+            )
+
+        if vendor_name and len(contexts) == 0:
+            self.logger.error(
+                "CRITICAL: No contracts passed vendor name filter for vendor '%s'. "
+                "Compliance analysis cannot proceed without matching contracts.",
+                vendor_name
             )
 
         return contexts, clause_references
 
     def _build_contract_query(self, invoice: Dict[str, Any]) -> str:
+        """
+        Build a semantic search query to find relevant contract clauses.
+        Includes pricing-related terms, service types, and invoice details for better retrieval.
+        """
         parts: List[str] = []
+        
+        # Add pricing-related terms to help find pricing clauses
+        parts.append("pricing rates fees charges costs per unit maximum cap limit not to exceed")
+        
         if invoice.get("seller_name"):
             parts.append(f"Vendor: {invoice['seller_name']}")
         if invoice.get("summary"):
             parts.append(f"Invoice Summary: {invoice['summary']}")
+        
+        # Include line item details for better matching
+        service_keywords = set()
         for item in invoice.get("line_items", [])[:5]:
-            description = item.get("description")
-            service_code = item.get("service_code")
+            description = item.get("description", "")
+            service_code = item.get("service_code", "")
+            unit_price = item.get("unit_price")
+            
             if description:
-                parts.append(f"Service Description: {description}")
+                parts.append(f"Service: {description}")
+                # Extract key service terms for matching
+                service_keywords.update(description.lower().split()[:3])
             if service_code:
                 parts.append(f"Service Code: {service_code}")
+            if unit_price:
+                # Include price context to find clauses with similar pricing
+                parts.append(f"Price: ${unit_price}")
+        
+        # Add service keywords for better semantic matching
+        if service_keywords:
+            parts.append(" ".join(list(service_keywords)[:5]))
+        
         return " | ".join(parts)
 
     def _extract_pricing_rules(
@@ -313,8 +457,24 @@ class ComplianceEngine:
                 continue
 
             expected_price = self._calculate_expected_price(item, matched_rule)
-            tolerance = matched_rule.get("tolerance_amount", 0)
-            tolerance_percent = matched_rule.get("tolerance_percent", 0)
+            # Handle None values from JSON - convert to 0 for proper comparison
+            tolerance = matched_rule.get("tolerance_amount")
+            if tolerance is None:
+                tolerance = 0
+            else:
+                try:
+                    tolerance = float(tolerance)
+                except (TypeError, ValueError):
+                    tolerance = 0
+            
+            tolerance_percent = matched_rule.get("tolerance_percent")
+            if tolerance_percent is None:
+                tolerance_percent = 0
+            else:
+                try:
+                    tolerance_percent = float(tolerance_percent)
+                except (TypeError, ValueError):
+                    tolerance_percent = 0
 
             if expected_price is None or actual_price is None:
                 continue
@@ -322,29 +482,52 @@ class ComplianceEngine:
             difference = actual_price - expected_price
             exceeds_amount = tolerance is not None and difference > tolerance
             exceeds_percent = False
-            if tolerance_percent:
+            if tolerance_percent and tolerance_percent > 0:
                 exceeds_percent = (
                     expected_price
                     and (difference / expected_price) * 100 > tolerance_percent
                 )
 
+            # Detect violation if difference > 0 and (tolerance exceeded OR no tolerance allowed)
             if difference > 0 and (exceeds_amount or exceeds_percent or tolerance == 0):
                 violation_type = matched_rule.get(
                     "violation_type", "Price Cap Exceeded"
                 )
-                violations.append(
-                    {
-                        "line_id": item.get("line_id"),
-                        "violation_type": violation_type,
-                        "expected_price": round(expected_price, 2),
-                        "actual_price": round(actual_price, 2),
-                        "difference": round(difference, 2),
-                        "contract_clause_reference": matched_rule.get(
-                            "clause_reference"
-                        ),
-                        "applied_rule": matched_rule,
-                    }
+                clause_reference = matched_rule.get("clause_reference") or None
+                
+                # Generate LLM reasoning for the violation
+                reasoning = self._generate_violation_reasoning(
+                    item, matched_rule, expected_price, actual_price, difference
                 )
+                
+                # Extract bounding box from line item metadata if available
+                pdf_location = None
+                item_metadata = item.get("metadata", {})
+                if isinstance(item_metadata, dict):
+                    pdf_location = item_metadata.get("pdf_location")
+                elif isinstance(item_metadata, str):
+                    # Handle case where metadata might be stored as JSON string
+                    try:
+                        parsed_metadata = json.loads(item_metadata)
+                        pdf_location = parsed_metadata.get("pdf_location") if isinstance(parsed_metadata, dict) else None
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                
+                violation = {
+                    "line_id": item.get("line_id"),
+                    "violation_type": violation_type,
+                    "expected_price": round(expected_price, 2),
+                    "actual_price": round(actual_price, 2),
+                    "difference": round(difference, 2),
+                    "clause_reference": clause_reference,
+                    "reasoning": reasoning,
+                }
+                
+                # Add bounding box if available
+                if pdf_location:
+                    violation["pdf_location"] = pdf_location
+                
+                violations.append(violation)
 
         summary = {
             "line_items_evaluated": len(line_items),
@@ -352,6 +535,106 @@ class ComplianceEngine:
             "violations_detected": len(violations),
         }
         return violations, summary
+
+    def _generate_violation_reasoning(
+        self,
+        line_item: Dict[str, Any],
+        rule: Dict[str, Any],
+        expected_price: float,
+        actual_price: float,
+        difference: float,
+    ) -> Dict[str, Any]:
+        """
+        Generate human-readable reasoning for why a violation occurred.
+        Returns a dictionary with explanation, expected_value, and actual_value.
+        """
+        description = line_item.get("description", "N/A")
+        service_code = line_item.get("service_code", "")
+        quantity = line_item.get("quantity", 1)
+        unit_price = line_item.get("unit_price")
+        total_price = line_item.get("total_price")
+        
+        rule_notes = rule.get("notes", "")
+        clause_ref = rule.get("clause_reference", "")
+        violation_type = rule.get("violation_type", "Price Cap Exceeded")
+        
+        # Build expected value description
+        expected_desc = ""
+        if rule.get("flat_fee") is not None:
+            expected_desc = f"${rule.get('flat_fee'):.2f} (flat fee)"
+        elif rule.get("unit_price") is not None:
+            expected_unit = rule.get("unit_price")
+            expected_total = expected_unit * quantity
+            expected_desc = f"${expected_unit:.2f} per unit × {quantity} = ${expected_total:.2f}"
+        elif rule.get("price_cap") is not None:
+            expected_desc = f"Maximum ${rule.get('price_cap'):.2f}"
+        else:
+            expected_desc = f"${expected_price:.2f}"
+        
+        # Build actual value description
+        actual_desc = ""
+        if total_price is not None:
+            actual_desc = f"${total_price:.2f}"
+        elif unit_price is not None:
+            actual_total = unit_price * quantity
+            actual_desc = f"${unit_price:.2f} per unit × {quantity} = ${actual_total:.2f}"
+        else:
+            actual_desc = f"${actual_price:.2f}"
+        
+        # Generate explanation
+        explanation_parts = [
+            f"Violation detected for line item: {description}",
+        ]
+        
+        if service_code:
+            explanation_parts.append(f"Service Code: {service_code}")
+        
+        explanation_parts.append(
+            f"The contract {clause_ref} specifies: {rule_notes}"
+        )
+        explanation_parts.append(
+            f"Expected: {expected_desc}"
+        )
+        explanation_parts.append(
+            f"Invoice shows: {actual_desc}"
+        )
+        explanation_parts.append(
+            f"Difference: ${difference:.2f} over the contract limit"
+        )
+        
+        explanation = " ".join(explanation_parts)
+        
+        # Convert Decimal to float for JSON serialization
+        def to_float(val):
+            if val is None:
+                return None
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return val
+        
+        return {
+            "explanation": explanation,
+            "expected_value": {
+                "description": expected_desc,
+                "amount": round(expected_price, 2),
+                "unit_price": to_float(rule.get("unit_price")),
+                "flat_fee": to_float(rule.get("flat_fee")),
+                "price_cap": to_float(rule.get("price_cap")),
+            },
+            "actual_value": {
+                "description": actual_desc,
+                "amount": round(actual_price, 2),
+                "unit_price": to_float(unit_price),
+                "quantity": to_float(quantity),
+                "line_item_description": description,
+            },
+            "contract_requirement": {
+                "clause_reference": clause_ref or None,
+                "notes": rule_notes or None,
+                "violation_type": violation_type or None,
+            },
+        }
 
     def _calculate_actual_price(self, line_item: Dict[str, Any]) -> Optional[float]:
         total_price = line_item.get("total_price")
@@ -398,20 +681,54 @@ class ComplianceEngine:
     def _match_rule(
         self, line_item: Dict[str, Any], rules: List[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
+        """
+        Match a line item to the most relevant pricing rule.
+        Uses service code exact match first, then keyword matching with scoring.
+        """
         description = (line_item.get("description") or "").lower()
         service_code = (line_item.get("service_code") or "").lower()
-
+        
+        # First pass: exact service code match
         for rule in rules:
             rule_service_code = (rule.get("service_code") or "").lower()
             if rule_service_code and rule_service_code == service_code:
+                self.logger.debug(f"Matched rule by service_code: {service_code}")
                 return rule
 
+        # Second pass: keyword matching with scoring
+        best_match = None
+        best_score = 0
+        
+        for rule in rules:
             keywords = rule.get("keywords") or []
+            if not keywords:
+                continue
+                
             normalized_keywords = [
-                kw.lower() for kw in keywords if isinstance(kw, str)
+                kw.lower().strip() for kw in keywords if isinstance(kw, str) and kw.strip()
             ]
-            if description and normalized_keywords:
-                if any(keyword in description for keyword in normalized_keywords):
-                    return rule
+            if not normalized_keywords:
+                continue
+            
+            # Count how many keywords match
+            matches = sum(1 for kw in normalized_keywords if kw in description)
+            if matches > 0:
+                # Score based on number of matches and keyword length (longer = more specific)
+                score = matches * 10 + sum(len(kw) for kw in normalized_keywords if kw in description)
+                if score > best_score:
+                    best_score = score
+                    best_match = rule
+        
+        if best_match:
+            self.logger.debug(f"Matched rule by keywords (score={best_score}): {best_match.get('keywords')}")
+            return best_match
+        
+        # Third pass: if no rules have keywords, use the first rule with pricing constraints
+        # This is a fallback for cases where LLM extracted rules but didn't add keywords
+        for rule in rules:
+            if rule.get("unit_price") or rule.get("price_cap") or rule.get("flat_fee"):
+                self.logger.debug("Using fallback rule (no keywords matched)")
+                return rule
+        
         return None
 
