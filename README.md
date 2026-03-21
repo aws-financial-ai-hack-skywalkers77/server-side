@@ -141,6 +141,10 @@ Trigger compliance analysis for a specific invoice (identified by its database I
 - Runs pgvector similarity search to fetch relevant contract clauses
 - Uses Gemini (RAG) to infer pricing rules from the contract
 - Applies a deterministic rule engine to flag overcharges or policy violations
+<<<<<<< Current (Your changes)
+=======
+- If an invoice has no stored line items, the engine infers a synthetic line item using the invoice subtotal/tax so the workflow still completes (reported via `line_item_source: "inferred"`).
+>>>>>>> Incoming (Background Agent changes)
 
 **Example Response:**
 ```json
@@ -168,6 +172,33 @@ curl -X POST "http://localhost:8001/analyze_invoice/123" \
 ```
 
 `123` is the invoices table primary key. Use `GET /invoices` to discover IDs if needed.
+
+### Analyze Multiple Invoices (Explicit List)
+
+**POST** `/analyze_invoices`
+
+Submit a list of invoice database IDs to evaluate in one call.
+
+**Request Body:**
+```json
+{
+  "invoice_ids": [123, 456, 789]
+}
+```
+
+**Example Response:**
+```json
+{
+  "status": "processed",
+  "processed": 3,
+  "failed": 0,
+  "reports": [
+    { "...single-invoice report..." },
+    { "...single-invoice report..." }
+  ],
+  "errors": []
+}
+```
 
 ### Analyze Invoices (Bulk Compliance)
 
