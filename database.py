@@ -230,18 +230,18 @@ class Database:
             self.conn.rollback()
             raise
     
-    def get_contract_by_id(self, contract_id):
-        """Get contract by contract_id"""
+    def get_contract_by_db_id(self, db_id):
+        """Get contract by database ID"""
         self.connect()
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
                     SELECT id, contract_id, summary, text, created_at, updated_at
                     FROM contracts
-                    WHERE contract_id = %s
+                    WHERE id = %s
                     LIMIT 1;
                 """
-                cur.execute(query, (contract_id,))
+                cur.execute(query, (db_id,))
                 result = cur.fetchone()
                 if result:
                     return dict(result)
