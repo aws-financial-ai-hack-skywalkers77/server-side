@@ -1,6 +1,7 @@
+import json
+import logging
 import google.generativeai as genai
 from config import Config
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,79 @@ class Vectorizer:
             logger.error(f"Error vectorizing query: {e}")
             raise
     
+    def _get_generative_model(self):
+        """
+        Initialize a Gemini generative model with graceful fallback to alt models.
+        Returns (model_instance, model_name_used)
+        """
+        model_name = Config.GEMINI_GENERATION_MODEL
+        logger.info(f"Attempting to use model: {model_name}")
+        try:
+            model = genai.GenerativeModel(model_name)
+            return model, model_name
+        except Exception as model_error:
+            logger.error(f"Error initializing model '{model_name}': {model_error}")
+            alternative_models = ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"]
+            for alt_model in alternative_models:
+                if alt_model == model_name:
+                    continue
+                try:
+                    logger.info(f"Trying alternative model: {alt_model}")
+                    model = genai.GenerativeModel(alt_model)
+                    logger.info(f"Successfully initialized model: {alt_model}")
+                    return model, alt_model
+                except Exception as alt_error:
+                    logger.warning(
+                        f"Failed to initialize alternative model '{alt_model}': {alt_error}"
+                    )
+                    continue
+            raise ValueError(
+                f"Could not initialize any Gemini model. Original error: {model_error}"
+            )
+
+    def _extract_text_from_response(self, response):
+        """
+        Extract textual content from Gemini response objects
+        """
+        # Method 1: Direct text attribute (most common)
+        if hasattr(response, 'text') and response.text:
+            return response.text
+
+        # Method 2: Check candidates
+        if hasattr(response, 'candidates') and len(response.candidates) > 0:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'content'):
+                if hasattr(candidate.content, 'parts'):
+                    text_parts = []
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            text_parts.append(part.text)
+                    if text_parts:
+                        return ''.join(text_parts)
+                elif hasattr(candidate.content, 'text') and candidate.content.text:
+                    return candidate.content.text
+                else:
+                    return str(candidate.content)
+            if hasattr(candidate, 'text') and candidate.text:
+                return candidate.text
+            return str(candidate)
+
+        # Method 3: Check for prompt_feedback (might indicate safety blocking)
+        if hasattr(response, 'prompt_feedback'):
+            feedback = response.prompt_feedback
+            logger.warning(f"Prompt feedback received: {feedback}")
+            if hasattr(feedback, 'block_reason') and feedback.block_reason:
+                raise ValueError(f"Content was blocked: {feedback.block_reason}")
+
+        logger.error("Could not extract text from Gemini response")
+        logger.error(f"Response type: {type(response)}")
+        logger.error(
+            f"Response attributes: {[attr for attr in dir(response) if not attr.startswith('_')]}"
+        )
+        if hasattr(response, '__dict__'):
+            logger.error(f"Response dict: {response.__dict__}")
+        raise ValueError("Could not extract answer from Gemini response")
+
     def generate_answer(self, query: str, context_texts: list, contract_ids: list = None):
         """
         Generate an answer to a query using retrieved contract contexts (RAG).
@@ -174,31 +248,8 @@ User Question: {query}
 
 Please provide a clear, accurate answer based on the contract excerpts above. If you reference specific information, mention which contract it comes from if available."""
             
-            # Get the model name - try different formats
-            model_name = Config.GEMINI_GENERATION_MODEL
-            logger.info(f"Attempting to use model: {model_name}")
-            
-            # Initialize the generative model
-            try:
-                model = genai.GenerativeModel(model_name)
-            except Exception as model_error:
-                logger.error(f"Error initializing model '{model_name}': {model_error}")
-                # Try alternative model names
-                alternative_models = ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"]
-                model = None
-                for alt_model in alternative_models:
-                    if alt_model != model_name:
-                        try:
-                            logger.info(f"Trying alternative model: {alt_model}")
-                            model = genai.GenerativeModel(alt_model)
-                            logger.info(f"Successfully initialized model: {alt_model}")
-                            break
-                        except Exception:
-                            continue
-                
-                if model is None:
-                    raise ValueError(f"Could not initialize any Gemini model. Original error: {model_error}")
-            
+            model, model_name = self._get_generative_model()
+
             # Generate response
             logger.info("Generating response from Gemini...")
             try:
@@ -207,62 +258,7 @@ Please provide a clear, accurate answer based on the contract excerpts above. If
                 logger.error(f"Error calling generate_content: {gen_error}")
                 raise
             
-            # Extract text from response - handle different response formats
-            answer = None
-            
-            # Method 1: Direct text attribute (most common)
-            if hasattr(response, 'text') and response.text:
-                answer = response.text
-                logger.debug("Extracted answer from response.text")
-            
-            # Method 2: Check candidates
-            elif hasattr(response, 'candidates') and len(response.candidates) > 0:
-                candidate = response.candidates[0]
-                logger.debug(f"Candidate: {type(candidate)}, attributes: {dir(candidate)}")
-                
-                # Check for finish_reason (might indicate blocking)
-                if hasattr(candidate, 'finish_reason'):
-                    if candidate.finish_reason != 1:  # 1 = STOP, other values might indicate issues
-                        logger.warning(f"Finish reason: {candidate.finish_reason}")
-                
-                # Try to get content from candidate
-                if hasattr(candidate, 'content'):
-                    if hasattr(candidate.content, 'parts'):
-                        text_parts = []
-                        for part in candidate.content.parts:
-                            if hasattr(part, 'text') and part.text:
-                                text_parts.append(part.text)
-                        if text_parts:
-                            answer = ''.join(text_parts)
-                            logger.debug("Extracted answer from candidate.content.parts")
-                    elif hasattr(candidate.content, 'text'):
-                        answer = candidate.content.text
-                        logger.debug("Extracted answer from candidate.content.text")
-                    else:
-                        answer = str(candidate.content)
-                        logger.debug("Extracted answer by converting candidate.content to string")
-                elif hasattr(candidate, 'text'):
-                    answer = candidate.text
-                    logger.debug("Extracted answer from candidate.text")
-                else:
-                    answer = str(candidate)
-                    logger.debug("Extracted answer by converting candidate to string")
-            
-            # Method 3: Check for prompt_feedback (might indicate safety blocking)
-            if not answer and hasattr(response, 'prompt_feedback'):
-                feedback = response.prompt_feedback
-                logger.warning(f"Prompt feedback received: {feedback}")
-                if hasattr(feedback, 'block_reason') and feedback.block_reason:
-                    raise ValueError(f"Content was blocked: {feedback.block_reason}")
-            
-            # If still no answer, log response structure for debugging
-            if not answer:
-                logger.error(f"Could not extract answer from response")
-                logger.error(f"Response type: {type(response)}")
-                logger.error(f"Response attributes: {[attr for attr in dir(response) if not attr.startswith('_')]}")
-                if hasattr(response, '__dict__'):
-                    logger.error(f"Response dict: {response.__dict__}")
-                raise ValueError("Could not extract answer from Gemini response")
+            answer = self._extract_text_from_response(response)
             
             if not answer.strip():
                 logger.error("Generated answer is empty after extraction")
@@ -273,4 +269,90 @@ Please provide a clear, accurate answer based on the contract excerpts above. If
         except Exception as e:
             logger.error(f"Error generating answer: {e}", exc_info=True)
             raise
+
+    def extract_pricing_rules(
+        self,
+        invoice_metadata: dict,
+        contract_contexts: list,
+    ) -> dict:
+        """
+        Use Gemini to derive structured pricing rules from contract contexts.
+
+        Returns:
+            Dictionary with keys:
+                - rules: List of pricing rule dicts
+                - rationale: Optional explanation text
+        """
+        if not contract_contexts:
+            return {"rules": [], "notes": "No contract context provided"}
+
+        invoice_details = []
+        if invoice_metadata.get("seller_name"):
+            invoice_details.append(f"Vendor: {invoice_metadata['seller_name']}")
+        if invoice_metadata.get("invoice_id"):
+            invoice_details.append(f"Invoice ID: {invoice_metadata['invoice_id']}")
+        if invoice_metadata.get("summary"):
+            invoice_details.append(f"Summary: {invoice_metadata['summary']}")
+
+        if invoice_metadata.get("line_items"):
+            for item in invoice_metadata["line_items"][:5]:
+                line_desc = item.get("description") or ""
+                unit_price = item.get("unit_price")
+                quantity = item.get("quantity")
+                invoice_details.append(
+                    f"Line Item: {line_desc}; unit_price={unit_price}; quantity={quantity}"
+                )
+
+        context = "\n\n---\n\n".join(contract_contexts)
+        invoice_block = "\n".join(invoice_details)
+
+        prompt = f"""
+You are a contract compliance analyst. Use the contract clauses below to derive pricing rules that should be enforced against the provided invoice context. Return your findings strictly as JSON.
+
+Contract Clauses:
+{context}
+
+Invoice Context:
+{invoice_block}
+
+Return JSON with the following structure:
+{{
+  "rules": [
+    {{
+      "service_code": "optional code that identifies the service",
+      "keywords": ["list", "of", "phrases"] optional,
+      "unit_price": number or null,
+      "price_cap": number or null,
+      "flat_fee": number or null,
+      "tolerance_amount": number optional,
+      "tolerance_percent": number optional,
+      "violation_type": "string describing the violation if exceeded",
+      "clause_reference": "Contract section or clause identifier",
+      "notes": "Optional clarifying notes"
+    }}
+  ],
+  "rationale": "Brief explanation of how the rules were derived"
+}}
+
+Do not include any additional text outside of the JSON payload.
+"""
+
+        model, model_name = self._get_generative_model()
+
+        logger.info("Requesting pricing rules from Gemini model '%s'", model_name)
+        response = model.generate_content(prompt)
+        raw_text = self._extract_text_from_response(response)
+
+        try:
+            parsed = json.loads(raw_text)
+            if "rules" not in parsed:
+                parsed["rules"] = []
+            return parsed
+        except json.JSONDecodeError as decode_error:
+            logger.error("Failed to parse pricing rules JSON: %s", decode_error)
+            return {
+                "rules": [],
+                "notes": f"Failed to parse pricing rules JSON: {decode_error}",
+                "raw_response": raw_text,
+            }
 

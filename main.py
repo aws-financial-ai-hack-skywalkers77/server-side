@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from config import Config
 from database import Database
+from compliance_engine import ComplianceEngine
 from document_processor import DocumentProcessor
 from vectorizer import Vectorizer
 
@@ -21,6 +22,8 @@ logger = logging.getLogger(__name__)
 origins = [
     "*"
 ]
+
+DEFAULT_BULK_LIMIT = 200
 
 
 app = FastAPI(title="Document Processing API", version="1.0.0")
@@ -40,10 +43,19 @@ class ContractQueryRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100, description="Maximum number of results to return")
     similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum similarity score (0.0 to 1.0)")
 
+class BulkComplianceRequest(BaseModel):
+    limit: int = Field(
+        default=200,
+        ge=1,
+        le=1000,
+        description="Maximum number of invoices to process during this bulk run",
+    )
+
 # Initialize components
 db = Database()
 document_processor = DocumentProcessor()
 vectorizer = Vectorizer()
+compliance_engine = ComplianceEngine(db=db, vectorizer=vectorizer)
 
 # Create tables on startup
 @app.on_event("startup")
@@ -370,6 +382,51 @@ async def upload_document(
                 logger.info(f"Cleaned up temporary file: {file_path}")
             except Exception as e:
                 logger.warning(f"Error removing temporary file: {e}")
+
+@app.post("/analyze_invoice/{invoice_id}")
+async def analyze_invoice(invoice_id: str):
+    """
+    Trigger contract compliance analysis for a single invoice.
+    """
+    try:
+        report = compliance_engine.analyze_invoice(invoice_id)
+        return JSONResponse(
+            status_code=200,
+            content=report
+        )
+    except ValueError as ve:
+        message = str(ve)
+        status_code = 404 if "not found" in message.lower() else 422
+        raise HTTPException(status_code=status_code, detail=message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error analyzing invoice '{invoice_id}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing invoice '{invoice_id}': {str(e)}"
+        )
+
+@app.post("/analyze_invoices_bulk")
+async def analyze_invoices_bulk(request: BulkComplianceRequest = Body(default=None)):
+    """
+    Run compliance analysis across outstanding invoices (scheduled/bulk mode).
+    """
+    try:
+        limit = request.limit if request else DEFAULT_BULK_LIMIT
+        summary = compliance_engine.analyze_invoices_bulk(limit=limit)
+        return JSONResponse(
+            status_code=200,
+            content=summary
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error running bulk invoice analysis: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error running bulk invoice analysis: {str(e)}"
+        )
 
 @app.post("/query_contracts")
 async def query_contracts(request: ContractQueryRequest = Body(...)):
