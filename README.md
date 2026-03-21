@@ -22,6 +22,7 @@ A document processing API built with Landing AI ADE (Agentic Document Extraction
   - text (full contract text)
 - **RESTful GET Endpoints**: Retrieve invoices and contracts with pagination support
 - **RAG Query Endpoint**: Query contracts using semantic search with LLM-generated answers (Retrieval-Augmented Generation)
+- **Compliance Automation**: Gemini-powered RAG + deterministic rule engine for single invoice checks and scheduled bulk monitoring
 
 ## Setup
 
@@ -129,6 +130,58 @@ curl -X POST "http://localhost:8001/upload_document" \
 ```
 
 ## API Endpoints
+
+### Analyze Single Invoice (Compliance)
+
+**POST** `/analyze_invoice/{invoice_id}`
+
+Trigger compliance analysis for a specific invoice. The service:
+
+- Retrieves invoice metadata and stored line items from PostgreSQL (AWS RDS)
+- Runs pgvector similarity search to fetch relevant contract clauses
+- Uses Gemini (RAG) to infer pricing rules from the contract
+- Applies a deterministic rule engine to flag overcharges or policy violations
+
+**Example Response:**
+```json
+{
+  "invoice_id": "INV-00845",
+  "status": "processed",
+  "violations": [
+    {
+      "line_id": "L-004",
+      "violation_type": "Price Cap Exceeded",
+      "expected_price": 120.0,
+      "actual_price": 140.0,
+      "difference": 20.0,
+      "contract_clause_reference": "Section 4.2.A"
+    }
+  ],
+  "next_run_scheduled_in_hours": 4
+}
+```
+
+### Analyze Invoices (Bulk Compliance)
+
+**POST** `/analyze_invoices_bulk`
+
+Executes the compliance pipeline across invoices that are either new or outdated (updated since their last compliance run). Intended for schedulers such as cron jobs, AWS EventBridge, or other orchestration tooling.
+
+**Request Body (optional):**
+
+- `limit` (default `200`): Maximum invoices to process during the run.
+
+**Example Response:**
+```json
+{
+  "status": "bulk_run_started",
+  "invoices_in_queue": 238,
+  "processed": 238,
+  "failed": 0,
+  "violations_detected": 17,
+  "next_run_scheduled_in_hours": 4
+}
+```
 
 ### Upload Document
 
