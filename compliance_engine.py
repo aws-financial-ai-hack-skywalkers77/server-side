@@ -25,25 +25,27 @@ class ComplianceEngine:
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
-    def analyze_invoice(self, invoice_id: str) -> Dict[str, Any]:
+    def analyze_invoice(self, invoice_db_id: int) -> Dict[str, Any]:
         """
         Run the full compliance workflow for a single invoice.
         """
-        invoice = self.db.get_invoice_with_line_items(invoice_id)
+        invoice = self.db.get_invoice_with_line_items(
+            invoice_db_id, identifier_is_db_id=True
+        )
         if not invoice:
-            raise ValueError(f"Invoice '{invoice_id}' not found")
+            raise ValueError(f"Invoice with database ID '{invoice_db_id}' not found")
 
         line_items = invoice.get("line_items", [])
         if not line_items:
             raise ValueError(
-                f"No line items stored for invoice '{invoice_id}'. "
+                f"No line items stored for invoice database ID '{invoice_db_id}'. "
                 "Compliance analysis requires line item data."
             )
 
         contract_contexts, clause_references = self._retrieve_contract_context(invoice)
         if not contract_contexts:
             self.logger.warning(
-                "No contract clauses retrieved for invoice '%s'", invoice_id
+                "No contract clauses retrieved for invoice '%s'", invoice.get("invoice_id")
             )
 
         pricing_rules = self._extract_pricing_rules(invoice, contract_contexts)
@@ -91,20 +93,22 @@ class ComplianceEngine:
         failures: List[Dict[str, Any]] = []
 
         for pending in pending_invoices:
-            invoice_id = pending.get("invoice_id")
+            invoice_db_id = pending.get("id")
+            invoice_number = pending.get("invoice_id")
             try:
-                report = self.analyze_invoice(invoice_id)
+                report = self.analyze_invoice(invoice_db_id)
                 processed_reports.append(report)
             except Exception as exc:  # pylint: disable=broad-except
                 self.logger.error(
                     "Compliance analysis failed for invoice '%s': %s",
-                    invoice_id,
+                    invoice_number or invoice_db_id,
                     exc,
                     exc_info=True,
                 )
                 failures.append(
                     {
-                        "invoice_id": invoice_id,
+                        "invoice_db_id": invoice_db_id,
+                        "invoice_id": invoice_number,
                         "error": str(exc),
                     }
                 )
