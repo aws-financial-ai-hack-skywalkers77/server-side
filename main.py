@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
 from pathlib import Path
@@ -15,7 +16,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+origins = [
+    "*"
+]
+
+
 app = FastAPI(title="Document Processing API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Initialize components
 db = Database()
