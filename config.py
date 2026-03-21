@@ -20,6 +20,9 @@ class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/embedding-001")
     EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "768"))  # Gemini embedding-001 returns 3072 dimensions
+    # Gemini model for text generation (RAG)
+    # Options: "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"
+    GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "gemini-2.5-pro")
     
     # File upload configuration
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp")

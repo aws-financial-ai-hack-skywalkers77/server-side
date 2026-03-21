@@ -1,6 +1,8 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional
 import os
 import logging
 from pathlib import Path
@@ -30,6 +32,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request/Response models
+class ContractQueryRequest(BaseModel):
+    query: str = Field(..., description="The search query text", min_length=1)
+    id: Optional[int] = Field(default=None, description="Optional database ID to filter search to a specific contract")
+    limit: int = Field(default=10, ge=1, le=100, description="Maximum number of results to return")
+    similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum similarity score (0.0 to 1.0)")
 
 # Initialize components
 db = Database()
@@ -361,6 +370,105 @@ async def upload_document(
                 logger.info(f"Cleaned up temporary file: {file_path}")
             except Exception as e:
                 logger.warning(f"Error removing temporary file: {e}")
+
+@app.post("/query_contracts")
+async def query_contracts(request: ContractQueryRequest = Body(...)):
+    """
+    Query contracts using RAG (Retrieval-Augmented Generation).
+    This endpoint:
+    1. Searches contracts using semantic vector similarity (only contracts, not invoices)
+    2. Uses an LLM to generate an answer based on the retrieved contracts
+    3. Returns both the generated answer and the source contracts
+    
+    Args:
+        request: ContractQueryRequest containing:
+            - query: The search query text/question
+            - id: Optional database ID to filter search to a specific contract
+            - limit: Maximum number of results (1-100, default: 10)
+            - similarity_threshold: Minimum similarity score (0.0-1.0, default: 0.0)
+    
+    Returns:
+        JSON response with:
+            - success: Boolean indicating success
+            - answer: LLM-generated answer based on retrieved contracts
+    """
+    try:
+        # Validate query is not empty
+        if not request.query or not request.query.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Query text cannot be empty"
+            )
+        
+        db_id = request.id
+        log_msg = f"Processing contract query: '{request.query}'"
+        if db_id:
+            log_msg += f" (db_id: {db_id})"
+        log_msg += f" (limit: {request.limit}, threshold: {request.similarity_threshold})"
+        logger.info(log_msg)
+        
+        # Vectorize the query text
+        query_vector = vectorizer.vectorize_query(request.query.strip())
+        
+        # Search contracts by similarity
+        results = db.search_contracts_by_similarity(
+            query_vector=query_vector,
+            limit=request.limit,
+            similarity_threshold=request.similarity_threshold,
+            contract_id=db_id
+        )
+        
+        # Check if we have any results
+        if not results:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "success": True,
+                    "answer": "No relevant contracts found matching your query."
+                }
+            )
+        
+        # Collect context texts for LLM
+        context_texts = []
+        contract_ids = []
+        
+        for contract in results:
+            contract_text = contract.get('text') or contract.get('summary') or ''
+            contract_id = contract.get('contract_id')
+            
+            # Collect context for LLM (use text if available, otherwise summary)
+            if contract_text:
+                context_texts.append(contract_text)
+                contract_ids.append(contract_id)
+        
+        # Generate answer using LLM (RAG)
+        try:
+            answer = vectorizer.generate_answer(
+                query=request.query.strip(),
+                context_texts=context_texts,
+                contract_ids=contract_ids if contract_ids else None
+            )
+        except Exception as e:
+            logger.error(f"Error generating LLM answer: {e}", exc_info=True)
+            # Return a more helpful error message that includes the actual error
+            answer = f"Unable to generate answer: {str(e)}"
+        
+        # Return only success and answer
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "answer": answer
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error querying contracts: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error querying contracts: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
