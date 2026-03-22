@@ -534,7 +534,7 @@ class DocumentProcessor:
                             "properties": {
                                 "line_id": {
                                     "type": "string",
-                                    "description": "Line item identifier or number (e.g., 'L-001', '1', 'Item 1')"
+                                    "description": "Exact line number or line label as printed on the invoice (e.g. '1', '2', '01', 'Line 3'). Do not invent sequential placeholders; copy from the document."
                                 },
                                 "description": {
                                     "type": "string",

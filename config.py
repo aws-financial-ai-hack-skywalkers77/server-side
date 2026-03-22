@@ -71,3 +71,11 @@ class Config:
     S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
     S3_ENABLED = os.getenv("S3_ENABLED", "true").lower() == "true"
 
+    # Comma-separated origins; default "*" for local development
+    _cors_raw = (os.getenv("CORS_ALLOW_ORIGINS") or "*").strip()
+    CORS_ALLOW_ORIGINS = (
+        [o.strip() for o in _cors_raw.split(",") if o.strip()]
+        if _cors_raw
+        else ["*"]
+    )
+

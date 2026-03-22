@@ -1,9 +1,22 @@
 import json
 import logging
+from dataclasses import replace
+from typing import Any, Dict, List, Optional
+
 import google.generativeai as genai
 from config import Config
+from evidence_validation import partition_rules_by_evidence
+from retrieval_chunk import RetrievalChunk
 
 logger = logging.getLogger(__name__)
+
+_CHUNK_PROMPT_MAX = 2000
+
+
+def _truncated_text(text: str, max_len: int = _CHUNK_PROMPT_MAX) -> str:
+    if len(text) > max_len:
+        return text[:max_len] + "... [truncated]"
+    return text
 
 class Vectorizer:
     def __init__(self):
@@ -239,16 +252,20 @@ class Vectorizer:
             context = "\n\n---\n\n".join(context_parts)
             
             # Build the prompt for the LLM
-            prompt = f"""You are a helpful assistant that answers questions about contracts based on the provided contract excerpts.
+            prompt = f"""You are an assistant that answers questions using ONLY the provided contract excerpts.
 
-Use the following contract excerpts to answer the user's question. If the information is not available in the provided excerpts, say so clearly.
+Rules:
+- Cite the Contract ID when you state a specific fact (e.g. "Under Contract ID X, ...").
+- If the answer is not supported by the excerpts, say clearly that the information is not in the provided text.
+- Do not invent clauses, dates, amounts, or obligations that are not in the excerpts.
+- Do not rely on general legal knowledge beyond what the excerpts say.
 
 Contract Excerpts:
 {context}
 
 User Question: {query}
 
-Please provide a clear, accurate answer based on the contract excerpts above. If you reference specific information, mention which contract it comes from if available."""
+Answer clearly. If the excerpts are insufficient, say what is missing."""
             
             model, model_name = self._get_generative_model()
 
@@ -275,117 +292,136 @@ Please provide a clear, accurate answer based on the contract excerpts above. If
     def extract_pricing_rules(
         self,
         invoice_metadata: dict,
-        contract_contexts: list,
+        retrieval_chunks: Optional[List[RetrievalChunk]] = None,
+        contract_contexts: Optional[list] = None,
     ) -> dict:
         """
-        Use Gemini to derive structured pricing rules from contract contexts.
+        Use Gemini to derive structured pricing rules from tagged retrieval chunks.
 
-        Returns:
-            Dictionary with keys:
-                - rules: List of pricing rule dicts
-                - rationale: Optional explanation text
+        Each rule must include evidence_quotes pointing at chunk_index and verbatim text
+        that appears in that chunk (validated programmatically).
+
+        For backward compatibility, contract_contexts (list of strings) may be passed
+        instead of retrieval_chunks; in that case evidence validation is skipped.
         """
-        if not contract_contexts:
-            return {"rules": [], "notes": "No contract context provided"}
+        chunks_in: Optional[List[RetrievalChunk]] = retrieval_chunks
+        if chunks_in is None and contract_contexts:
+            chunks_in = [
+                RetrievalChunk(
+                    chunk_index=i,
+                    contract_db_id=-1,
+                    contract_id=None,
+                    text=ctx,
+                    context_source="legacy_string",
+                )
+                for i, ctx in enumerate(contract_contexts[:5])
+            ]
+        if not chunks_in:
+            return {
+                "rules": [],
+                "rejected_rules": [],
+                "notes": "No contract context provided",
+                "parse_failed": False,
+                "extraction_model": None,
+                "rules_raw_count": 0,
+                "validated_rules_count": 0,
+            }
+
+        # Align prompt text with validation (truncated the same way)
+        truncated_chunks = [
+            replace(c, text=_truncated_text(c.text)) for c in chunks_in[:5]
+        ]
 
         # Build detailed invoice line items for matching
         invoice_line_items = []
         if invoice_metadata.get("line_items"):
             for idx, item in enumerate(invoice_metadata["line_items"][:10], 1):
-                line_id = item.get("line_id") or f"L-{idx:03d}"
+                lid_raw = (item.get("line_id") or "").strip()
+                line_label = lid_raw if lid_raw else f"row {idx+1} (no line number in extraction)"
                 description = item.get("description") or ""
                 service_code = item.get("service_code") or ""
                 quantity = item.get("quantity", 1)
                 unit_price = item.get("unit_price")
                 total_price = item.get("total_price")
-                
-                line_str = f"Line {line_id}: {description}"
+
+                line_str = f"Line {line_label}: {description}"
                 if service_code:
                     line_str += f" (Service Code: {service_code})"
                 line_str += f" | Quantity: {quantity} | Unit Price: ${unit_price} | Total: ${total_price}"
                 invoice_line_items.append(line_str)
         else:
-            # Fallback for inferred line items
             subtotal = invoice_metadata.get("subtotal_amount", 0)
             if subtotal:
-                invoice_line_items.append(f"Line L-001: Invoice Total | Quantity: 1 | Unit Price: ${subtotal} | Total: ${subtotal}")
+                invoice_line_items.append(
+                    f"Invoice total (single synthesized line) | Quantity: 1 | Unit Price: ${subtotal} | Total: ${subtotal}"
+                )
 
-        # Format contract contexts with clear separators
-        formatted_contexts = []
-        for idx, ctx in enumerate(contract_contexts[:5], 1):
-            # Truncate very long contexts to focus on pricing clauses
-            max_length = 2000
-            if len(ctx) > max_length:
-                ctx = ctx[:max_length] + "... [truncated]"
-            formatted_contexts.append(f"=== CONTRACT CLAUSE {idx} ===\n{ctx}\n")
-
-        context_block = "\n\n".join(formatted_contexts)
+        chunk_blocks = []
+        for c in truncated_chunks:
+            chunk_blocks.append(
+                f"=== CHUNK_INDEX: {c.chunk_index} | CONTRACT_DB_ID: {c.contract_db_id} | "
+                f"CONTRACT_ID: {c.contract_id or 'unknown'} ===\n"
+                f"{c.text}\n"
+            )
+        context_block = "\n\n".join(chunk_blocks)
         invoice_block = "\n".join(invoice_line_items) if invoice_line_items else "No line items available"
 
-        # Enhanced prompt with examples and explicit instructions
-        prompt = f"""You are an expert contract compliance analyst. Your task is to extract PRECISE pricing rules from the contract clauses below that apply to the invoice line items.
+        prompt = f"""You are an expert contract compliance analyst. Extract PRECISE pricing rules from the chunks below for the invoice line items.
+
+EVIDENCE REQUIREMENTS (mandatory for every rule):
+- Each rule MUST include "evidence_quotes": an array of at least one object:
+  {{ "chunk_index": <int matching CHUNK_INDEX above>, "verbatim_quote": "<exact substring from that chunk's text>" }}
+- The verbatim_quote MUST be copy-pasted from the chunk text (it will be validated).
 
 CRITICAL INSTRUCTIONS:
-1. Extract ALL pricing limits, caps, rates, and fees mentioned in the contract clauses
-2. Match each invoice line item to relevant contract pricing rules
-3. Extract EXACT NUMERIC VALUES (dollars, percentages, quantities) from the contract
-4. If a contract mentions "$120 per tree" or "maximum $120 per unit", extract unit_price: 120
-5. If a contract mentions "not to exceed $250" or "capped at $250", extract price_cap: 250
-6. Include service codes, keywords, or descriptions that help match invoice lines to rules
-7. Be aggressive in finding pricing constraints - look for words like "maximum", "cap", "limit", "not to exceed", "shall not exceed", "up to", "per unit", "per hour", etc.
+1. Extract pricing limits, caps, rates, and fees from the chunks only.
+2. Extract EXACT NUMERIC VALUES from the contract text.
+3. Include keywords or service_code to match invoice lines.
+4. Use chunk_index from the headers to cite evidence.
 
-EXAMPLE OUTPUT:
-If contract says: "Routine tree pruning services shall be billed at a rate not to exceed $120 per tree. Emergency services may include a mobilization surcharge not to exceed $250."
-And invoice has: "Line L-001: Willow tree pruning (12 trees @ $150 each)"
-
-You should extract:
+EXAMPLE (structure only):
 {{
   "rules": [
     {{
-      "keywords": ["tree pruning", "pruning", "routine"],
+      "keywords": ["tree", "pruning"],
       "unit_price": 120,
       "price_cap": 120,
       "violation_type": "Unit Price Exceeds Contract Cap",
-      "clause_reference": "Section 4.2 - Routine Services Pricing",
-      "notes": "Contract caps routine pruning at $120/tree"
-    }},
-    {{
-      "keywords": ["emergency", "mobilization", "surcharge"],
-      "price_cap": 250,
-      "violation_type": "Mobilization Surcharge Exceeds Cap",
-      "clause_reference": "Section 4.3 - Emergency Services",
-      "notes": "Emergency mobilization surcharge capped at $250"
+      "clause_reference": "Section named in chunk",
+      "notes": "Cap from contract",
+      "evidence_quotes": [{{ "chunk_index": 0, "verbatim_quote": "not to exceed $120 per tree" }}]
     }}
   ],
-  "rationale": "Extracted unit price cap of $120/tree for routine pruning and $250 cap for emergency mobilization from contract clauses."
+  "rationale": "Brief summary."
 }}
 
-CONTRACT CLAUSES:
+RETRIEVED CONTRACT CHUNKS:
 {context_block}
 
-INVOICE LINE ITEMS TO EVALUATE:
+INVOICE LINE ITEMS:
 {invoice_block}
 
-Now extract pricing rules from the contract clauses that apply to these invoice line items. Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON:
 {{
   "rules": [
     {{
-      "service_code": "string or null - service identifier if mentioned",
-      "keywords": ["array", "of", "matching", "terms"],
-      "unit_price": number or null,
-      "price_cap": number or null,
-      "flat_fee": number or null,
-      "tolerance_amount": number or null,
-      "tolerance_percent": number or null,
-      "violation_type": "string describing what violation occurs if exceeded",
-      "clause_reference": "string - section/clause identifier from contract",
-      "notes": "string - brief explanation"
+      "service_code": null,
+      "keywords": [],
+      "unit_price": null,
+      "price_cap": null,
+      "flat_fee": null,
+      "tolerance_amount": null,
+      "tolerance_percent": null,
+      "violation_type": "string",
+      "clause_reference": "string",
+      "notes": "string",
+      "evidence_quotes": [{{ "chunk_index": 0, "verbatim_quote": "..." }}]
     }}
   ],
-  "rationale": "string - explanation of extracted rules"
+  "rationale": "string"
 }}
 
-IMPORTANT: Return ONLY the JSON object. No markdown, no code blocks, no explanations outside the JSON."""
+IMPORTANT: Return ONLY the JSON object. No markdown fences."""
 
         model, model_name = self._get_generative_model()
 
@@ -394,19 +430,17 @@ IMPORTANT: Return ONLY the JSON object. No markdown, no code blocks, no explanat
             response = model.generate_content(
                 prompt,
                 generation_config={
-                    "temperature": 0.1,  # Lower temperature for more consistent extraction
+                    "temperature": 0.1,
                     "top_p": 0.8,
-                }
+                },
             )
         except Exception as e:
-            logger.warning(f"Error with generation_config, trying without: {e}")
+            logger.warning("Error with generation_config, trying without: %s", e)
             response = model.generate_content(prompt)
-        
+
         raw_text = self._extract_text_from_response(response)
-        
-        # Clean up common JSON extraction issues
+
         raw_text = raw_text.strip()
-        # Remove markdown code blocks if present
         if raw_text.startswith("```json"):
             raw_text = raw_text[7:]
         if raw_text.startswith("```"):
@@ -415,21 +449,49 @@ IMPORTANT: Return ONLY the JSON object. No markdown, no code blocks, no explanat
             raw_text = raw_text[:-3]
         raw_text = raw_text.strip()
 
+        legacy_mode = retrieval_chunks is None and contract_contexts is not None
+
         try:
             parsed = json.loads(raw_text)
             if "rules" not in parsed:
                 parsed["rules"] = []
-            # Validate and log extracted rules
-            logger.info(f"Extracted {len(parsed.get('rules', []))} pricing rules from contract")
-            for rule in parsed.get("rules", []):
-                logger.debug(f"Rule: {rule.get('keywords', [])} -> unit_price={rule.get('unit_price')}, price_cap={rule.get('price_cap')}")
-            return parsed
+            raw_rules = parsed.get("rules") or []
+            if not isinstance(raw_rules, list):
+                raw_rules = []
+
+            if legacy_mode:
+                validated = raw_rules
+                rejected: List[Dict[str, Any]] = []
+            else:
+                validated, rejected = partition_rules_by_evidence(raw_rules, truncated_chunks)
+
+            logger.info(
+                "Pricing rules: raw=%s validated=%s rejected=%s",
+                len(raw_rules),
+                len(validated),
+                len(rejected),
+            )
+            out: Dict[str, Any] = {
+                "rules": validated,
+                "rejected_rules": rejected,
+                "rationale": parsed.get("rationale"),
+                "parse_failed": False,
+                "extraction_model": model_name,
+                "rules_raw_count": len(raw_rules),
+                "validated_rules_count": len(validated),
+            }
+            return out
         except json.JSONDecodeError as decode_error:
             logger.error("Failed to parse pricing rules JSON: %s", decode_error)
             logger.error("Raw response (first 500 chars): %s", raw_text[:500])
             return {
                 "rules": [],
+                "rejected_rules": [],
                 "notes": f"Failed to parse pricing rules JSON: {decode_error}",
-                "raw_response": raw_text[:1000],  # Store first 1000 chars for debugging
+                "raw_response": raw_text[:1000],
+                "parse_failed": True,
+                "extraction_model": model_name,
+                "rules_raw_count": 0,
+                "validated_rules_count": 0,
             }
 

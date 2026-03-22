@@ -1,8 +1,10 @@
 import json
 import psycopg2
+from psycopg2 import OperationalError
 from psycopg2.extras import RealDictCursor
 from config import Config
 import logging
+from datetime import date
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
@@ -13,9 +15,21 @@ class Database:
     
     def connect(self):
         """Establish connection to PostgreSQL database"""
-        if self.conn is not None:
-            return  # Already connected
-        
+        if self.conn is not None and self.conn.closed == 0:
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                return
+            except (psycopg2.InterfaceError, OperationalError):
+                logger.warning("Database connection stale; reconnecting")
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+        elif self.conn is not None:
+            self.conn = None
+
         try:
             self.conn = psycopg2.connect(
                 host=Config.DB_HOST,
@@ -334,6 +348,8 @@ class Database:
                 for item in line_items:
                     metadata = item.get('metadata', {})
                     metadata_json = json.dumps(metadata)
+                    _lid = (item.get("line_id") or "").strip()
+                    line_id = _lid if _lid else None
                     logger.debug(f"Inserting line item '{item.get('description', '')[:50]}' with metadata: {metadata_json}")
                     
                     insert_query = """
@@ -346,7 +362,7 @@ class Database:
                     """
                     cur.execute(insert_query, (
                         invoice_db_id,
-                        item.get('line_id'),
+                        line_id,
                         item.get('description', ''),
                         item.get('service_code'),
                         item.get('quantity'),
@@ -438,10 +454,12 @@ class Database:
 
     def _convert_decimals_to_float(self, obj):
         """
-        Recursively convert Decimal objects to float for JSON serialization.
+        Recursively convert values for JSON: Decimal to float, date/datetime to ISO strings.
         """
         if isinstance(obj, Decimal):
             return float(obj)
+        if isinstance(obj, date):
+            return obj.isoformat()
         elif isinstance(obj, dict):
             return {key: self._convert_decimals_to_float(value) for key, value in obj.items()}
         elif isinstance(obj, list):
@@ -735,5 +753,6 @@ class Database:
         """Close database connection"""
         if self.conn:
             self.conn.close()
+            self.conn = None
             logger.info("Database connection closed")
 

@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List
@@ -21,11 +21,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-origins = [
-    "*"
-]
+origins = Config.CORS_ALLOW_ORIGINS or ["*"]
 
 DEFAULT_BULK_LIMIT = 200
+
+RAG_EXCERPT_MAX_LEN = 1200
+
+
+def _contract_excerpt_for_sources(contract: dict, max_len: int = RAG_EXCERPT_MAX_LEN):
+    text = contract.get("text") or contract.get("summary") or ""
+    if not text:
+        return "", False
+    truncated = len(text) > max_len
+    excerpt = text[:max_len] + ("..." if truncated else "")
+    return excerpt, truncated
 
 # Filenames like contract.pdf should not override ADE-extracted contract_id
 _GENERIC_CONTRACT_UPLOAD_STEMS = frozenset(
@@ -260,6 +269,143 @@ async def get_invoice_by_db_id(db_id: int):
             status_code=500,
             detail=f"Error retrieving invoice: {str(e)}"
         )
+
+
+@app.get("/invoices/by-invoice-id/{invoice_id}/pdf_url")
+async def get_invoice_pdf_presigned_url_by_invoice_number(invoice_id: str):
+    """
+    Same as /invoices/{db_id}/pdf_url but resolves by business invoice_id (e.g. INV-2024-OM-004).
+    Use when the UI only has the invoice number, not the database primary key.
+    """
+    inv = db.get_invoice_by_id(invoice_id)
+    if not inv:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Invoice '{invoice_id}' not found",
+        )
+    invoice_db_id = inv.get("id")
+    s3_key = db.get_invoice_s3_key(invoice_db_id)
+    if not s3_key:
+        raise HTTPException(
+            status_code=404,
+            detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
+        )
+    try:
+        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "invoice_db_id": invoice_db_id,
+                "invoice_id": invoice_id,
+                "url": url,
+            },
+        )
+    except Exception as e:
+        logger.error("Error generating presigned PDF URL: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/invoices/by-invoice-id/{invoice_id}/pdf")
+async def redirect_invoice_pdf_by_invoice_number(invoice_id: str):
+    """302 redirect to presigned PDF, keyed by business invoice_id."""
+    inv = db.get_invoice_by_id(invoice_id)
+    if not inv:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Invoice '{invoice_id}' not found",
+        )
+    invoice_db_id = inv.get("id")
+    s3_key = db.get_invoice_s3_key(invoice_db_id)
+    if not s3_key:
+        raise HTTPException(
+            status_code=404,
+            detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
+        )
+    try:
+        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        return RedirectResponse(url=url, status_code=302)
+    except Exception as e:
+        logger.error("Error redirecting to PDF: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/invoices/{invoice_db_id}/pdf_url")
+async def get_invoice_pdf_presigned_url(invoice_db_id: int):
+    """
+    Return a fresh presigned URL for this invoice's stored PDF in S3.
+    Use this from the frontend with window.open(url) or <a href={url} target="_blank">
+    so each invoice opens its own file (URLs are unique per invoice key).
+    """
+    s3_key = db.get_invoice_s3_key(invoice_db_id)
+    if not s3_key:
+        raise HTTPException(
+            status_code=404,
+            detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
+        )
+    try:
+        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "invoice_db_id": invoice_db_id,
+                "url": url,
+            },
+        )
+    except Exception as e:
+        logger.error("Error generating presigned PDF URL: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/invoices/{invoice_db_id}/pdf")
+async def redirect_invoice_pdf_to_s3(invoice_db_id: int):
+    """HTTP redirect to the presigned S3 URL (browser navigation / open in new tab)."""
+    s3_key = db.get_invoice_s3_key(invoice_db_id)
+    if not s3_key:
+        raise HTTPException(
+            status_code=404,
+            detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
+        )
+    try:
+        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        return RedirectResponse(url=url, status_code=302)
+    except Exception as e:
+        logger.error("Error redirecting to PDF: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/invoices/{invoice_db_id}/compliance_report/latest")
+async def get_latest_compliance_report_for_invoice(invoice_db_id: int):
+    """
+    Latest saved compliance row for this invoice, including llm_metadata.s3_url when present.
+    """
+    try:
+        inv = db.get_invoice_by_db_id(invoice_db_id)
+        if not inv:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Invoice with database ID '{invoice_db_id}' not found",
+            )
+        report = db.get_latest_compliance_report(invoice_db_id)
+        if not report:
+            raise HTTPException(
+                status_code=404,
+                detail="No compliance report found for this invoice. Run analyze first.",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "report": db._convert_decimals_to_float(dict(report)),
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error loading compliance report: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/contracts")
 async def get_contracts(
@@ -658,23 +804,41 @@ async def query_contracts(request: ContractQueryRequest = Body(...)):
                 status_code=200,
                 content={
                     "success": True,
-                    "answer": "No relevant contracts found matching your query."
+                    "answer": "No relevant contracts found matching your query.",
+                    "sources": [],
+                    "disclaimer": "Answers reflect only the retrieved excerpts below; verify against the full agreement.",
                 }
             )
-        
-        # Collect context texts for LLM
+
+        # Collect context texts for LLM and build audit-friendly sources
         context_texts = []
         contract_ids = []
-        
+        sources = []
+
         for contract in results:
-            contract_text = contract.get('text') or contract.get('summary') or ''
-            contract_id = contract.get('contract_id')
-            
-            # Collect context for LLM (use text if available, otherwise summary)
+            contract_text = contract.get("text") or contract.get("summary") or ""
+            contract_id = contract.get("contract_id")
+            sim = contract.get("similarity")
+            try:
+                sim_val = float(sim) if sim is not None else None
+            except (TypeError, ValueError):
+                sim_val = None
+
+            excerpt, excerpt_truncated = _contract_excerpt_for_sources(contract)
+            sources.append(
+                {
+                    "contract_db_id": contract.get("id"),
+                    "contract_id": contract_id,
+                    "similarity": sim_val,
+                    "excerpt": excerpt,
+                    "excerpt_truncated": excerpt_truncated,
+                }
+            )
+
             if contract_text:
                 context_texts.append(contract_text)
                 contract_ids.append(contract_id)
-        
+
         # Generate answer using LLM (RAG)
         try:
             answer = vectorizer.generate_answer(
@@ -684,15 +848,15 @@ async def query_contracts(request: ContractQueryRequest = Body(...)):
             )
         except Exception as e:
             logger.error(f"Error generating LLM answer: {e}", exc_info=True)
-            # Return a more helpful error message that includes the actual error
             answer = f"Unable to generate answer: {str(e)}"
-        
-        # Return only success and answer
+
         return JSONResponse(
             status_code=200,
             content={
                 "success": True,
-                "answer": answer
+                "answer": answer,
+                "sources": sources,
+                "disclaimer": "Answers reflect only the retrieved excerpts below; verify against the full agreement.",
             }
         )
     except HTTPException:
