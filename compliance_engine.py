@@ -1,8 +1,22 @@
 import json
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
+
 from pdf_highlighter import PDFHighlighter
+
+
+def _to_float(val: Any, default: Optional[float] = None) -> Optional[float]:
+    """Coerce DB Decimals, strings, etc. for safe arithmetic (avoid float * Decimal)."""
+    if val is None:
+        return default
+    if isinstance(val, Decimal):
+        return float(val)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
 
 
 class ComplianceEngine:
@@ -231,15 +245,10 @@ class ComplianceEngine:
         subtotal_amount = invoice.get("subtotal_amount")
         tax_amount = invoice.get("tax_amount")
 
-        try:
-            subtotal_value = float(subtotal_amount) if subtotal_amount is not None else None
-        except (TypeError, ValueError):
-            subtotal_value = None
-
-        try:
-            tax_value = float(tax_amount) if tax_amount is not None else 0.0
-        except (TypeError, ValueError):
-            tax_value = 0.0
+        subtotal_value = (
+            _to_float(subtotal_amount) if subtotal_amount is not None else None
+        )
+        tax_value = _to_float(tax_amount, 0.0) or 0.0
 
         if subtotal_value is None:
             self.logger.warning(
@@ -292,11 +301,15 @@ class ComplianceEngine:
 
         # Get vendor name from invoice for strict filtering
         vendor_name = invoice.get("seller_name")
-        
+        # Vendor is already enforced in SQL (LIKE on vendor_name/text/summary). A high
+        # semantic threshold can exclude every row even when the contract is correct,
+        # which prevents pricing rules and violations from being computed.
+        similarity_threshold = 0.0 if vendor_name else 0.3
+
         contract_matches = self.db.search_contracts_by_similarity(
             query_vector=query_vector,
             limit=self.clause_limit,
-            similarity_threshold=0.3,  # Increased from 0.1 to get more relevant matches
+            similarity_threshold=similarity_threshold,
             vendor_name=vendor_name,  # Hard filter: only contracts for this vendor
         )
         
@@ -315,7 +328,11 @@ class ComplianceEngine:
         if vendor_name:
             vendor_normalized = vendor_name.strip().lower()
             # Remove common business suffixes for matching
-            for suffix in [' inc.', ' inc', '. inc', ' llc', ' ltd.', ' ltd', ' corporation', ' corp.', ' corp']:
+            for suffix in [
+                ', inc.', ', llc', ', ltd.', ', corporation', ', corp.',
+                ' inc.', ' inc', '. inc', ' llc', ' ltd.', ' ltd',
+                ' corporation', ' corp.', ' corp',
+            ]:
                 if vendor_normalized.endswith(suffix):
                     vendor_normalized = vendor_normalized[:-len(suffix)].strip()
                     break
@@ -504,12 +521,14 @@ class ComplianceEngine:
         violations: List[Dict[str, Any]] = []
 
         for item in line_items:
-            actual_price = self._calculate_actual_price(item)
+            actual_price = _to_float(self._calculate_actual_price(item))
             matched_rule = self._match_rule(item, rules)
             if not matched_rule:
                 continue
 
-            expected_price = self._calculate_expected_price(item, matched_rule)
+            expected_price = _to_float(
+                self._calculate_expected_price(item, matched_rule)
+            )
             # Handle None values from JSON - convert to 0 for proper comparison
             tolerance = matched_rule.get("tolerance_amount")
             if tolerance is None:
@@ -617,18 +636,17 @@ class ComplianceEngine:
             if subtotal_amount is None:
                 # Fallback: calculate from line items
                 total_invoice_amount = sum(
-                    float(item.get("total_price", 0) or 0)
+                    _to_float(item.get("total_price"), 0.0) or 0.0
                     for item in line_items
                 )
             else:
-                try:
-                    subtotal = float(subtotal_amount)
-                    tax = float(tax_amount) if tax_amount else 0.0
+                subtotal = _to_float(subtotal_amount)
+                tax = _to_float(tax_amount, 0.0) or 0.0
+                if subtotal is not None:
                     total_invoice_amount = subtotal + tax
-                except (TypeError, ValueError):
-                    # Fallback: calculate from line items
+                else:
                     total_invoice_amount = sum(
-                        float(item.get("total_price", 0) or 0)
+                        _to_float(item.get("total_price"), 0.0) or 0.0
                         for item in line_items
                     )
             
@@ -661,18 +679,19 @@ class ComplianceEngine:
                     violation = violations_by_line_id[line_id]
                     expected_price = violation.get("expected_price")
                     if expected_price is not None:
-                        try:
-                            max_invoice_amount_legal += float(expected_price)
-                        except (TypeError, ValueError):
-                            # Fallback to actual price if expected_price is invalid
-                            if actual_total_price is not None:
-                                max_invoice_amount_legal += actual_total_price
+                        ep = _to_float(expected_price)
+                        if ep is not None:
+                            max_invoice_amount_legal += ep
+                        elif actual_total_price is not None:
+                            max_invoice_amount_legal += actual_total_price
                     elif actual_total_price is not None:
                         max_invoice_amount_legal += actual_total_price
                 else:
                     # No violation, use actual price
                     if actual_total_price is not None:
-                        max_invoice_amount_legal += actual_total_price
+                        at = _to_float(actual_total_price)
+                        if at is not None:
+                            max_invoice_amount_legal += at
             
             # Ensure max_invoice_amount_legal doesn't exceed total_invoice_amount
             if max_invoice_amount_legal > total_invoice_amount:
@@ -718,7 +737,7 @@ class ComplianceEngine:
         """
         description = line_item.get("description", "N/A")
         service_code = line_item.get("service_code", "")
-        quantity = line_item.get("quantity", 1)
+        quantity = _to_float(line_item.get("quantity"), 1.0) or 1.0
         unit_price = line_item.get("unit_price")
         total_price = line_item.get("total_price")
         
@@ -729,23 +748,27 @@ class ComplianceEngine:
         # Build expected value description
         expected_desc = ""
         if rule.get("flat_fee") is not None:
-            expected_desc = f"${rule.get('flat_fee'):.2f} (flat fee)"
+            ff = _to_float(rule.get("flat_fee"), 0.0) or 0.0
+            expected_desc = f"${ff:.2f} (flat fee)"
         elif rule.get("unit_price") is not None:
-            expected_unit = rule.get("unit_price")
+            expected_unit = _to_float(rule.get("unit_price"), 0.0) or 0.0
             expected_total = expected_unit * quantity
             expected_desc = f"${expected_unit:.2f} per unit × {quantity} = ${expected_total:.2f}"
         elif rule.get("price_cap") is not None:
-            expected_desc = f"Maximum ${rule.get('price_cap'):.2f}"
+            cap = _to_float(rule.get("price_cap"), 0.0) or 0.0
+            expected_desc = f"Maximum ${cap:.2f}"
         else:
             expected_desc = f"${expected_price:.2f}"
         
         # Build actual value description
         actual_desc = ""
         if total_price is not None:
-            actual_desc = f"${total_price:.2f}"
+            tp = _to_float(total_price, 0.0) or 0.0
+            actual_desc = f"${tp:.2f}"
         elif unit_price is not None:
-            actual_total = unit_price * quantity
-            actual_desc = f"${unit_price:.2f} per unit × {quantity} = ${actual_total:.2f}"
+            up = _to_float(unit_price, 0.0) or 0.0
+            actual_total = up * quantity
+            actual_desc = f"${up:.2f} per unit × {quantity} = ${actual_total:.2f}"
         else:
             actual_desc = f"${actual_price:.2f}"
         
@@ -772,29 +795,20 @@ class ComplianceEngine:
         
         explanation = " ".join(explanation_parts)
         
-        # Convert Decimal to float for JSON serialization
-        def to_float(val):
-            if val is None:
-                return None
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                return val
-        
         return {
             "explanation": explanation,
             "expected_value": {
                 "description": expected_desc,
                 "amount": round(expected_price, 2),
-                "unit_price": to_float(rule.get("unit_price")),
-                "flat_fee": to_float(rule.get("flat_fee")),
-                "price_cap": to_float(rule.get("price_cap")),
+                "unit_price": _to_float(rule.get("unit_price")),
+                "flat_fee": _to_float(rule.get("flat_fee")),
+                "price_cap": _to_float(rule.get("price_cap")),
             },
             "actual_value": {
                 "description": actual_desc,
                 "amount": round(actual_price, 2),
-                "unit_price": to_float(unit_price),
-                "quantity": to_float(quantity),
+                "unit_price": _to_float(unit_price),
+                "quantity": _to_float(quantity),
                 "line_item_description": description,
             },
             "contract_requirement": {
@@ -807,42 +821,36 @@ class ComplianceEngine:
     def _calculate_actual_price(self, line_item: Dict[str, Any]) -> Optional[float]:
         total_price = line_item.get("total_price")
         if total_price is not None:
-            return float(total_price)
+            return _to_float(total_price)
         quantity = line_item.get("quantity", 1)
         unit_price = line_item.get("unit_price")
         if unit_price is None:
             return None
-        try:
-            return float(unit_price) * float(quantity or 1)
-        except (TypeError, ValueError):
+        q = _to_float(quantity, 1.0) or 1.0
+        u = _to_float(unit_price)
+        if u is None:
             return None
+        return u * q
 
     def _calculate_expected_price(
         self, line_item: Dict[str, Any], rule: Dict[str, Any]
     ) -> Optional[float]:
-        quantity = line_item.get("quantity", 1)
-        try:
-            quantity = float(quantity or 1)
-        except (TypeError, ValueError):
-            quantity = 1.0
+        quantity = _to_float(line_item.get("quantity"), 1.0) or 1.0
 
         if rule.get("flat_fee") is not None:
-            try:
-                return float(rule["flat_fee"])
-            except (TypeError, ValueError):
-                return None
+            return _to_float(rule.get("flat_fee"))
 
         if rule.get("unit_price") is not None:
-            try:
-                return float(rule["unit_price"]) * quantity
-            except (TypeError, ValueError):
+            u = _to_float(rule.get("unit_price"))
+            if u is None:
                 return None
+            return u * quantity
 
         if rule.get("price_cap") is not None:
-            try:
-                return float(rule["price_cap"]) * quantity
-            except (TypeError, ValueError):
+            c = _to_float(rule.get("price_cap"))
+            if c is None:
                 return None
+            return c * quantity
 
         return None
 

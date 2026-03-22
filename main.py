@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List
 import os
 import re
@@ -26,6 +26,22 @@ origins = [
 ]
 
 DEFAULT_BULK_LIMIT = 200
+
+# Filenames like contract.pdf should not override ADE-extracted contract_id
+_GENERIC_CONTRACT_UPLOAD_STEMS = frozenset(
+    {"contract", "document", "file", "upload", "invoice", "untitled", "scan", "new"}
+)
+
+
+def _s3_invoice_pdf_basename(metadata: dict, upload_filename: str) -> str:
+    """Prefer extracted invoice_id for the S3 object name so keys match the stored invoice number."""
+    inv = (metadata.get("invoice_id") or "").strip()
+    if inv:
+        base = re.sub(r"[^a-zA-Z0-9._-]", "_", inv)
+        if not base.lower().endswith(".pdf"):
+            base = f"{base}.pdf"
+        return base if base else "invoice.pdf"
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", Path(upload_filename).name) or "invoice.pdf"
 
 
 app = FastAPI(title="Document Processing API", version="1.0.0")
@@ -54,11 +70,24 @@ class BulkComplianceRequest(BaseModel):
     )
 
 class InvoiceListRequest(BaseModel):
-    invoice_ids: List[int] = Field(
-        ...,
-        description="List of invoice database IDs to analyze",
-        min_items=1,
+    invoice_ids: Optional[List[int]] = Field(
+        default=None,
+        description="Database primary keys (invoices.id). Use this or invoice_numbers.",
     )
+    invoice_numbers: Optional[List[str]] = Field(
+        default=None,
+        description="Business invoice_id values (e.g. INV-2024-OM-004). Use this or invoice_ids.",
+    )
+
+    @model_validator(mode="after")
+    def require_invoice_selection(self):
+        ids = self.invoice_ids or []
+        nums = self.invoice_numbers or []
+        if not ids and not nums:
+            raise ValueError(
+                "Provide invoice_ids (database ids) and/or invoice_numbers (invoice_id strings)"
+            )
+        return self
 
 # Initialize components
 db = Database()
@@ -143,6 +172,53 @@ async def get_invoices(
             status_code=500,
             detail=f"Error retrieving invoices: {str(e)}"
         )
+
+@app.get("/invoices/by_invoice_id/{invoice_id}")
+async def get_invoice_by_invoice_id(invoice_id: str):
+    """
+    Fetch invoice metadata by business invoice number (e.g. INV-2024-OM-004).
+    Use this from UIs that list invoice_id; GET /invoices/{db_id} expects the numeric database id.
+    """
+    try:
+        invoice = db.get_invoice_by_id(invoice_id)
+        if not invoice:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Invoice with invoice_id '{invoice_id}' not found",
+            )
+        response_metadata = {
+            "db_id": invoice.get("id"),
+            "invoice_id": invoice.get("invoice_id"),
+            "seller_name": invoice.get("seller_name"),
+            "seller_address": invoice.get("seller_address"),
+            "tax_id": invoice.get("tax_id"),
+            "subtotal_amount": float(invoice.get("subtotal_amount", 0))
+            if invoice.get("subtotal_amount")
+            else 0.0,
+            "tax_amount": float(invoice.get("tax_amount", 0))
+            if invoice.get("tax_amount")
+            else 0.0,
+            "summary": invoice.get("summary"),
+            "created_at": invoice.get("created_at").isoformat()
+            if invoice.get("created_at")
+            else None,
+            "updated_at": invoice.get("updated_at").isoformat()
+            if invoice.get("updated_at")
+            else None,
+        }
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "metadata": response_metadata},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving invoice: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving invoice: {str(e)}",
+        )
+
 
 @app.get("/invoices/{db_id}")
 async def get_invoice_by_db_id(db_id: int):
@@ -334,7 +410,19 @@ async def upload_document(
             metadata = document_processor.extract_invoice_data(str(file_path))
         elif doc_type == 'contract':
             metadata = document_processor.extract_contract_data(str(file_path))
-        
+            # Prefer a meaningful upload filename as contract_id (user expectation); otherwise ADE extraction.
+            stem_raw = Path(file.filename).stem.strip()
+            stem_id = re.sub(r"[^a-zA-Z0-9._-]", "_", stem_raw) if stem_raw else ""
+            if stem_id and stem_raw.lower() not in _GENERIC_CONTRACT_UPLOAD_STEMS:
+                metadata["contract_id"] = stem_id
+                logger.info("contract_id from upload filename: %s", stem_id)
+            elif not (metadata.get("contract_id") or "").strip() and stem_id:
+                metadata["contract_id"] = stem_id
+                logger.info(
+                    "contract_id missing from extraction; using upload filename stem: %s",
+                    stem_id,
+                )
+
         # Vectorize the metadata
         vector = vectorizer.vectorize_metadata(metadata)
         
@@ -355,7 +443,7 @@ async def upload_document(
 
             if Config.S3_ENABLED and Config.S3_BUCKET_NAME and invoice_db_id:
                 try:
-                    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(file.filename).name) or "invoice.pdf"
+                    safe_name = _s3_invoice_pdf_basename(metadata, file.filename)
                     s3_key = f"invoices/{invoice_db_id}/{safe_name}"
                     s3 = boto3.client("s3", region_name=Config.AWS_REGION)
                     s3.put_object(
@@ -451,18 +539,46 @@ async def analyze_invoice(invoice_db_id: int):
 @app.post("/analyze_invoices")
 async def analyze_invoices(request: InvoiceListRequest = Body(...)):
     """
-    Trigger compliance analysis for a list of invoice database IDs.
+    Trigger compliance analysis for selected invoices.
+    Pass invoice_ids (numeric DB ids), invoice_numbers (e.g. INV-2024-OM-004), or both.
     """
     try:
-        summary = compliance_engine.analyze_invoices_explicit(request.invoice_ids)
+        resolved: List[int] = []
+        seen: set = set()
+        for db_id in request.invoice_ids or []:
+            if db_id not in seen:
+                seen.add(db_id)
+                resolved.append(db_id)
+        for number in request.invoice_numbers or []:
+            label = (number or "").strip()
+            if not label:
+                continue
+            inv = db.get_invoice_by_id(label)
+            if not inv:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Invoice with invoice_id '{label}' not found",
+                )
+            iid = inv.get("id")
+            if iid is not None and iid not in seen:
+                seen.add(iid)
+                resolved.append(iid)
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail="No invoices to analyze after resolving invoice_numbers / invoice_ids",
+            )
+        summary = compliance_engine.analyze_invoices_explicit(resolved)
         return JSONResponse(
             status_code=200,
             content=summary
         )
     except HTTPException:
         raise
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
-        logger.error(f"Error analyzing invoices '{request.invoice_ids}': {e}", exc_info=True)
+        logger.error(f"Error analyzing invoices: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Error analyzing invoices: {str(e)}"
