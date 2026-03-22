@@ -132,8 +132,10 @@ class ComplianceEngine:
             if s3_key:
                 # If no contracts found, return original PDF
                 if no_contracts_found:
-                    s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
-                    self.logger.info(f"No contracts found, returning original PDF S3 URL: {s3_url}")
+                    s3_url = self.pdf_highlighter.get_pdf_presigned_url(
+                        s3_key, highlighted=True
+                    )
+                    self.logger.info(f"No contracts found, returning PDF S3 URL (highlighted if present): {s3_url}")
                 else:
                     # Contracts found - highlight PDF if violations exist, otherwise return original
                     s3_url = self.pdf_highlighter.process_invoice_pdf(
@@ -147,7 +149,9 @@ class ComplianceEngine:
                             self.logger.info(f"No violations found, returning original PDF S3 URL: {s3_url}")
                     else:
                         self.logger.warning("PDF processing returned None, falling back to original")
-                        s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
+                        s3_url = self.pdf_highlighter.get_pdf_presigned_url(
+                            s3_key, highlighted=True
+                        )
             else:
                 self.logger.warning(f"No S3 key found for invoice {invoice.get('id')}, skipping S3 URL generation")
         except Exception as e:
@@ -157,8 +161,10 @@ class ComplianceEngine:
             try:
                 s3_key = self.db.get_invoice_s3_key(invoice.get("id"))
                 if s3_key:
-                    s3_url = self.pdf_highlighter.get_original_pdf_url(s3_key)
-                    self.logger.info(f"Using original PDF S3 URL as fallback: {s3_url}")
+                    s3_url = self.pdf_highlighter.get_pdf_presigned_url(
+                        s3_key, highlighted=True
+                    )
+                    self.logger.info(f"Using PDF S3 URL as fallback (highlighted if present): {s3_url}")
             except Exception as fallback_error:
                 self.logger.error(f"Failed to get original PDF S3 URL as fallback: {fallback_error}")
         

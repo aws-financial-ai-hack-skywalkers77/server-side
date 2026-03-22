@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List
+import json
 import os
 import re
 import logging
@@ -21,11 +22,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-origins = Config.CORS_ALLOW_ORIGINS or ["*"]
+# Merge Vite dev origins so the SPA can call pdf_url / compliance routes from localhost:5173.
+_VITE_DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+_cfg_origins = Config.CORS_ALLOW_ORIGINS or ["*"]
+if _cfg_origins == ["*"] or (len(_cfg_origins) == 1 and _cfg_origins[0] == "*"):
+    origins = ["*"]
+else:
+    origins = list(dict.fromkeys([*list(_cfg_origins), *_VITE_DEV_ORIGINS]))
 
 DEFAULT_BULK_LIMIT = 200
 
 RAG_EXCERPT_MAX_LEN = 1200
+
+
+def _risk_percentage_for_invoice_json(risk_assessment_score):
+    """Map stored score to a 0–100 display percentage (scores ≤1 treated as fractions)."""
+    if risk_assessment_score is None:
+        return None
+    try:
+        f = float(risk_assessment_score)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= f <= 1.0:
+        return round(f * 100, 4)
+    return round(min(100.0, max(0.0, f)), 4)
 
 
 def _contract_excerpt_for_sources(contract: dict, max_len: int = RAG_EXCERPT_MAX_LEN):
@@ -104,6 +124,59 @@ document_processor = DocumentProcessor()
 vectorizer = Vectorizer()
 compliance_engine = ComplianceEngine(db=db, vectorizer=vectorizer)
 
+
+def _invoice_pdf_url_json_payload(url: str, **extra) -> dict:
+    """Client accepts any of url / pdf_url / presigned_url / download_url for the PDF link."""
+    payload = {
+        "success": True,
+        "url": url,
+        "pdf_url": url,
+        "presigned_url": url,
+        "download_url": url,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _enrich_compliance_report_pdf_urls(report: dict, invoice_db_id: int) -> dict:
+    """
+    Fresh presigned URLs and explicit highlighted fields so clients can prefer
+    highlighted_pdf_url / llm_metadata.highlighted_s3_url over plain pdf_url.
+    """
+    out = dict(report)
+    if not Config.S3_ENABLED or not Config.S3_BUCKET_NAME:
+        return out
+    s3_key = db.get_invoice_s3_key(invoice_db_id)
+    if not s3_key:
+        return out
+    ph = compliance_engine.pdf_highlighter
+    try:
+        llm = out.get("llm_metadata")
+        if llm is None:
+            llm = {}
+        elif isinstance(llm, str):
+            llm = json.loads(llm)
+        else:
+            llm = dict(llm)
+
+        orig_url = ph.get_original_pdf_url(s3_key)
+        out["pdf_url"] = orig_url
+        llm["s3_url"] = orig_url
+
+        hk = ph.highlighted_key_from_original(s3_key)
+        if hk and hk != s3_key and ph.s3_object_exists(hk):
+            h_url = ph.get_original_pdf_url(hk)
+            out["highlighted_pdf_url"] = h_url
+            llm["highlighted_s3_url"] = h_url
+
+        out["llm_metadata"] = llm
+    except Exception as e:
+        logger.warning(
+            "Could not attach fresh PDF URLs to compliance report: %s", e, exc_info=True
+        )
+    return out
+
+
 # Create tables on startup
 @app.on_event("startup")
 async def startup_event():
@@ -151,6 +224,10 @@ async def get_invoices(
         # Format response
         formatted_invoices = []
         for invoice in invoices:
+            ras = invoice.get("risk_assessment_score")
+            rt = invoice.get("risk_tier")
+            if isinstance(rt, str) and rt.strip() == "":
+                rt = None
             formatted_invoices.append({
                 'id': invoice.get('id'),
                 'invoice_id': invoice.get('invoice_id'),
@@ -160,6 +237,10 @@ async def get_invoices(
                 'subtotal_amount': float(invoice.get('subtotal_amount', 0)) if invoice.get('subtotal_amount') else 0.0,
                 'tax_amount': float(invoice.get('tax_amount', 0)) if invoice.get('tax_amount') else 0.0,
                 'summary': invoice.get('summary'),
+                'compliance_status': invoice.get('compliance_status'),
+                'risk_tier': rt,
+                'risk_assessment_score': float(ras) if ras is not None else None,
+                'risk_percentage': _risk_percentage_for_invoice_json(ras),
                 'created_at': invoice.get('created_at').isoformat() if invoice.get('created_at') else None,
                 'updated_at': invoice.get('updated_at').isoformat() if invoice.get('updated_at') else None
             })
@@ -272,7 +353,13 @@ async def get_invoice_by_db_id(db_id: int):
 
 
 @app.get("/invoices/by-invoice-id/{invoice_id}/pdf_url")
-async def get_invoice_pdf_presigned_url_by_invoice_number(invoice_id: str):
+async def get_invoice_pdf_presigned_url_by_invoice_number(
+    invoice_id: str,
+    highlighted: bool = Query(
+        False,
+        description="If true, presign invoices/{db}/{invoice_id}_highlighted.pdf when it exists; else original PDF.",
+    ),
+):
     """
     Same as /invoices/{db_id}/pdf_url but resolves by business invoice_id (e.g. INV-2024-OM-004).
     Use when the UI only has the invoice number, not the database primary key.
@@ -291,15 +378,14 @@ async def get_invoice_pdf_presigned_url_by_invoice_number(invoice_id: str):
             detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
         )
     try:
-        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        url = compliance_engine.pdf_highlighter.get_pdf_presigned_url(
+            s3_key, highlighted=highlighted
+        )
         return JSONResponse(
             status_code=200,
-            content={
-                "success": True,
-                "invoice_db_id": invoice_db_id,
-                "invoice_id": invoice_id,
-                "url": url,
-            },
+            content=_invoice_pdf_url_json_payload(
+                url, invoice_db_id=invoice_db_id, invoice_id=invoice_id
+            ),
         )
     except Exception as e:
         logger.error("Error generating presigned PDF URL: %s", e, exc_info=True)
@@ -307,7 +393,13 @@ async def get_invoice_pdf_presigned_url_by_invoice_number(invoice_id: str):
 
 
 @app.get("/invoices/by-invoice-id/{invoice_id}/pdf")
-async def redirect_invoice_pdf_by_invoice_number(invoice_id: str):
+async def redirect_invoice_pdf_by_invoice_number(
+    invoice_id: str,
+    highlighted: bool = Query(
+        False,
+        description="If true, redirect to highlighted PDF in S3 when present.",
+    ),
+):
     """302 redirect to presigned PDF, keyed by business invoice_id."""
     inv = db.get_invoice_by_id(invoice_id)
     if not inv:
@@ -323,7 +415,9 @@ async def redirect_invoice_pdf_by_invoice_number(invoice_id: str):
             detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
         )
     try:
-        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        url = compliance_engine.pdf_highlighter.get_pdf_presigned_url(
+            s3_key, highlighted=highlighted
+        )
         return RedirectResponse(url=url, status_code=302)
     except Exception as e:
         logger.error("Error redirecting to PDF: %s", e, exc_info=True)
@@ -331,7 +425,13 @@ async def redirect_invoice_pdf_by_invoice_number(invoice_id: str):
 
 
 @app.get("/invoices/{invoice_db_id}/pdf_url")
-async def get_invoice_pdf_presigned_url(invoice_db_id: int):
+async def get_invoice_pdf_presigned_url(
+    invoice_db_id: int,
+    highlighted: bool = Query(
+        False,
+        description="If true, presign the highlighted PDF object when it exists; else the original key.",
+    ),
+):
     """
     Return a fresh presigned URL for this invoice's stored PDF in S3.
     Use this from the frontend with window.open(url) or <a href={url} target="_blank">
@@ -344,14 +444,12 @@ async def get_invoice_pdf_presigned_url(invoice_db_id: int):
             detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
         )
     try:
-        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        url = compliance_engine.pdf_highlighter.get_pdf_presigned_url(
+            s3_key, highlighted=highlighted
+        )
         return JSONResponse(
             status_code=200,
-            content={
-                "success": True,
-                "invoice_db_id": invoice_db_id,
-                "url": url,
-            },
+            content=_invoice_pdf_url_json_payload(url, invoice_db_id=invoice_db_id),
         )
     except Exception as e:
         logger.error("Error generating presigned PDF URL: %s", e, exc_info=True)
@@ -359,7 +457,13 @@ async def get_invoice_pdf_presigned_url(invoice_db_id: int):
 
 
 @app.get("/invoices/{invoice_db_id}/pdf")
-async def redirect_invoice_pdf_to_s3(invoice_db_id: int):
+async def redirect_invoice_pdf_to_s3(
+    invoice_db_id: int,
+    highlighted: bool = Query(
+        False,
+        description="If true, redirect to highlighted PDF in S3 when present.",
+    ),
+):
     """HTTP redirect to the presigned S3 URL (browser navigation / open in new tab)."""
     s3_key = db.get_invoice_s3_key(invoice_db_id)
     if not s3_key:
@@ -368,7 +472,9 @@ async def redirect_invoice_pdf_to_s3(invoice_db_id: int):
             detail="No PDF stored for this invoice. Upload with S3 enabled or check configuration.",
         )
     try:
-        url = compliance_engine.pdf_highlighter.get_original_pdf_url(s3_key)
+        url = compliance_engine.pdf_highlighter.get_pdf_presigned_url(
+            s3_key, highlighted=highlighted
+        )
         return RedirectResponse(url=url, status_code=302)
     except Exception as e:
         logger.error("Error redirecting to PDF: %s", e, exc_info=True)
@@ -393,11 +499,14 @@ async def get_latest_compliance_report_for_invoice(invoice_db_id: int):
                 status_code=404,
                 detail="No compliance report found for this invoice. Run analyze first.",
             )
+        report_payload = _enrich_compliance_report_pdf_urls(
+            db._convert_decimals_to_float(dict(report)), invoice_db_id
+        )
         return JSONResponse(
             status_code=200,
             content={
                 "success": True,
-                "report": db._convert_decimals_to_float(dict(report)),
+                "report": report_payload,
             },
         )
     except HTTPException:

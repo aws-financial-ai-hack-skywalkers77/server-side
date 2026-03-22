@@ -306,15 +306,25 @@ class Database:
             raise
     
     def get_all_invoices(self, limit=100, offset=0):
-        """Get all invoices with pagination"""
+        """Get all invoices with pagination; includes latest compliance risk tier/score when available."""
         self.connect()
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, invoice_id, seller_name, seller_address, tax_id,
-                           subtotal_amount, tax_amount, summary, created_at, updated_at
-                    FROM invoices
-                    ORDER BY created_at DESC
+                    SELECT i.id, i.invoice_id, i.seller_name, i.seller_address, i.tax_id,
+                           i.subtotal_amount, i.tax_amount, i.summary, i.created_at, i.updated_at,
+                           i.compliance_status,
+                           COALESCE(cr.risk_assessment_score, i.risk_assessment_score) AS risk_assessment_score,
+                           (cr.llm_metadata->>'risk_tier') AS risk_tier
+                    FROM invoices i
+                    LEFT JOIN LATERAL (
+                        SELECT risk_assessment_score, llm_metadata
+                        FROM compliance_reports
+                        WHERE invoice_id = i.id
+                        ORDER BY processed_at DESC NULLS LAST
+                        LIMIT 1
+                    ) cr ON true
+                    ORDER BY i.created_at DESC
                     LIMIT %s OFFSET %s;
                 """
                 cur.execute(query, (limit, offset))

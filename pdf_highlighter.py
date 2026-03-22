@@ -3,7 +3,6 @@ import boto3
 from botocore.exceptions import ClientError
 import fitz  # PyMuPDF
 from io import BytesIO
-from datetime import datetime
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -133,29 +132,7 @@ class PDFHighlighter:
             Presigned S3 URL of the uploaded highlighted PDF
         """
         try:
-            # Generate new S3 key for highlighted PDF
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            # Extract original filename and add _highlighted suffix
-            if "/" in original_s3_key:
-                path_parts = original_s3_key.rsplit("/", 1)
-                directory = path_parts[0]
-                filename = path_parts[1]
-            else:
-                directory = ""
-                filename = original_s3_key
-            
-            # Add _highlighted before file extension
-            if "." in filename:
-                name, ext = filename.rsplit(".", 1)
-                highlighted_filename = f"{name}_highlighted.{ext}"
-            else:
-                highlighted_filename = f"{filename}_highlighted"
-            
-            if directory:
-                highlighted_s3_key = f"{directory}/{highlighted_filename}"
-            else:
-                highlighted_s3_key = highlighted_filename
-            
+            highlighted_s3_key = self.highlighted_key_from_original(original_s3_key)
             logger.info(f"Uploading highlighted PDF to S3: {highlighted_s3_key}")
             
             # Upload to S3
@@ -180,6 +157,54 @@ class PDFHighlighter:
             logger.error(f"Error uploading highlighted PDF to S3: {e}")
             raise Exception(f"Failed to upload highlighted PDF to S3: {str(e)}")
     
+    @staticmethod
+    def highlighted_key_from_original(original_s3_key: str) -> str:
+        """Same key convention as upload_highlighted_pdf_to_s3: name_highlighted.ext beside the original."""
+        if "/" in original_s3_key:
+            directory, filename = original_s3_key.rsplit("/", 1)
+        else:
+            directory, filename = "", original_s3_key
+        if "." in filename:
+            name, ext = filename.rsplit(".", 1)
+            highlighted_filename = f"{name}_highlighted.{ext}"
+        else:
+            highlighted_filename = f"{filename}_highlighted"
+        if directory:
+            return f"{directory}/{highlighted_filename}"
+        return highlighted_filename
+
+    def s3_object_exists(self, key: str) -> bool:
+        try:
+            self.s3_client.head_object(Bucket=Config.S3_BUCKET_NAME, Key=key)
+            return True
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
+
+    def get_pdf_url_prefer_highlighted(self, s3_key: str, expires_in: int = 3600) -> str:
+        """
+        Presigned URL for the highlighted PDF if `*_highlighted.pdf` exists in the bucket,
+        otherwise the original key.
+        """
+        hk = self.highlighted_key_from_original(s3_key)
+        if hk and hk != s3_key and self.s3_object_exists(hk):
+            logger.info("Serving highlighted PDF: %s", hk)
+            return self.get_original_pdf_url(hk, expires_in=expires_in)
+        return self.get_original_pdf_url(s3_key, expires_in=expires_in)
+
+    def get_pdf_presigned_url(
+        self, s3_key: str, *, highlighted: bool = False, expires_in: int = 3600
+    ) -> str:
+        """
+        If highlighted is True, presign the highlighted object when it exists; else the original.
+        If highlighted is False, always presign the stored original key only.
+        """
+        if highlighted:
+            return self.get_pdf_url_prefer_highlighted(s3_key, expires_in=expires_in)
+        return self.get_original_pdf_url(s3_key, expires_in=expires_in)
+
     def get_original_pdf_url(self, s3_key: str, expires_in: int = 3600) -> str:
         """
         Get presigned URL for the original PDF.
@@ -222,9 +247,8 @@ class PDFHighlighter:
             ]
             
             if not violations_with_location:
-                logger.info("No violations with bounding box locations found, returning original PDF URL")
-                # Return original PDF URL if no violations
-                return self.get_original_pdf_url(s3_key)
+                logger.info("No violations with bounding box locations found; prefer highlighted PDF in S3 if present")
+                return self.get_pdf_url_prefer_highlighted(s3_key)
             
             logger.info(f"Processing PDF highlighting for {len(violations_with_location)} violations")
             
@@ -243,8 +267,8 @@ class PDFHighlighter:
             logger.error(f"Error processing invoice PDF: {e}", exc_info=True)
             # If highlighting fails, try to return original PDF URL as fallback
             try:
-                logger.warning("Falling back to original PDF URL due to highlighting error")
-                return self.get_original_pdf_url(s3_key)
+                logger.warning("Falling back to PDF URL (highlighted if present) due to highlighting error")
+                return self.get_pdf_url_prefer_highlighted(s3_key)
             except Exception as fallback_error:
                 logger.error(f"Failed to get original PDF URL: {fallback_error}")
                 return None
