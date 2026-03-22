@@ -460,6 +460,12 @@ class ComplianceEngine:
 
             if pricing_clauses:
                 for clause in pricing_clauses[:3]:
+                    raw_clause_id = clause.get("clause_id")
+                    if raw_clause_id is None:
+                        clause_id_str = None
+                    else:
+                        s = str(raw_clause_id).strip()
+                        clause_id_str = s if s else None
                     clause_context = f"=== {clause.get('clause_id', 'Pricing Clause')} ===\n"
                     if clause.get("section_title"):
                         clause_context += f"Section: {clause['section_title']}\n"
@@ -474,6 +480,7 @@ class ComplianceEngine:
                             similarity=similarity_value,
                             vendor_name=vname,
                             service_types=service_types,
+                            clause_id=clause_id_str,
                         )
                     )
                     chunk_index += 1

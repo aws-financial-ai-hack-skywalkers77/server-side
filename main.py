@@ -611,6 +611,74 @@ async def get_contract_by_db_id(db_id: int):
             detail=f"Error retrieving contract: {str(e)}"
         )
 
+
+@app.get("/contracts/{contract_db_id}/clause")
+async def get_contract_clause(
+    contract_db_id: int,
+    clause_id: str = Query(
+        ...,
+        min_length=1,
+        description="Structured clause identifier from contract extraction (e.g. Section 4.2)",
+    ),
+):
+    """
+    Return one clause object from a contract's stored `clauses` JSON (by `clause_id`).
+    """
+    try:
+        result = db.get_contract_clause_by_clause_id(contract_db_id, clause_id)
+        if not result.get("found"):
+            reason = result.get("reason", "unknown")
+            if reason == "contract_not_found":
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Contract with database ID '{contract_db_id}' not found",
+                )
+            if reason == "invalid_clause_id":
+                raise HTTPException(
+                    status_code=400,
+                    detail="clause_id must be a non-empty string",
+                )
+            if reason == "no_clauses":
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"Contract '{contract_db_id}' has no structured clauses stored; "
+                        "cannot resolve clause_id"
+                    ),
+                )
+            if reason == "clause_not_found":
+                known = result.get("clause_ids") or []
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "message": f"No clause with clause_id matching '{clause_id}'",
+                        "contract_db_id": result.get("contract_db_id"),
+                        "contract_id": result.get("contract_id"),
+                        "clause_ids": known,
+                    },
+                )
+            raise HTTPException(status_code=404, detail="Clause not found")
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "contract_db_id": result.get("contract_db_id"),
+                "contract_id": result.get("contract_id"),
+                "vendor_name": result.get("vendor_name"),
+                "clause": result.get("clause"),
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving contract clause: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving contract clause: {str(e)}",
+        )
+
+
 @app.post("/upload_document")
 async def upload_document(
     file: UploadFile = File(...),

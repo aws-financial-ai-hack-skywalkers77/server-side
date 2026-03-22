@@ -635,6 +635,97 @@ class Database:
         except Exception as e:
             logger.error(f"Error retrieving contract by contract_id: {e}")
             raise
+
+    @staticmethod
+    def _parse_contract_clauses_json(clauses_raw):
+        """Normalize clauses JSONB to a list of dicts, or []."""
+        if clauses_raw is None:
+            return []
+        if isinstance(clauses_raw, str):
+            try:
+                clauses_raw = json.loads(clauses_raw)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        if not isinstance(clauses_raw, list):
+            return []
+        return clauses_raw
+
+    def get_contract_clause_by_clause_id(self, contract_db_id: int, clause_id: str):
+        """
+        Look up a single structured clause on a contract by clauses[].clause_id.
+
+        Returns a dict:
+          - { "found": True, "contract_db_id", "contract_id", "vendor_name", "clause": {...} }
+          - { "found": False, "reason": "contract_not_found" }
+          - { "found": False, "reason": "no_clauses", "contract_db_id", "contract_id" }
+          - { "found": False, "reason": "clause_not_found", "contract_db_id", "contract_id",
+              "clause_ids": [...] }
+        """
+        self.connect()
+        want = (clause_id or "").strip()
+        if not want:
+            return {"found": False, "reason": "invalid_clause_id"}
+
+        try:
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, contract_id, vendor_name, clauses
+                    FROM contracts
+                    WHERE id = %s
+                    LIMIT 1;
+                    """,
+                    (contract_db_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"found": False, "reason": "contract_not_found"}
+
+                rowd = dict(row)
+                clauses = self._parse_contract_clauses_json(rowd.get("clauses"))
+                if not clauses:
+                    return {
+                        "found": False,
+                        "reason": "no_clauses",
+                        "contract_db_id": rowd["id"],
+                        "contract_id": rowd.get("contract_id"),
+                    }
+
+                for c in clauses:
+                    if not isinstance(c, dict):
+                        continue
+                    cid = c.get("clause_id")
+                    if cid is None:
+                        continue
+                    if str(cid).strip() == want:
+                        return {
+                            "found": True,
+                            "contract_db_id": rowd["id"],
+                            "contract_id": rowd.get("contract_id"),
+                            "vendor_name": rowd.get("vendor_name"),
+                            "clause": dict(c),
+                        }
+
+                known_ids = [
+                    str(c.get("clause_id")).strip()
+                    for c in clauses
+                    if isinstance(c, dict) and c.get("clause_id") is not None
+                ]
+                return {
+                    "found": False,
+                    "reason": "clause_not_found",
+                    "contract_db_id": rowd["id"],
+                    "contract_id": rowd.get("contract_id"),
+                    "clause_ids": known_ids,
+                }
+        except Exception as e:
+            logger.error(
+                "Error retrieving clause %r for contract_db_id=%s: %s",
+                clause_id,
+                contract_db_id,
+                e,
+            )
+            raise
     
     def get_all_contracts(self, limit=100, offset=0):
         """Get all contracts with pagination"""

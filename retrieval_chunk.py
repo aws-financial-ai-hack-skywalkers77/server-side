@@ -16,6 +16,7 @@ class RetrievalChunk:
     similarity: Optional[float] = None
     vendor_name: Optional[str] = None
     service_types: Optional[List[Any]] = None
+    clause_id: Optional[str] = None
 
     def to_reference_dict(self) -> Dict[str, Any]:
         """API-facing clause reference row (backward compatible + new fields)."""
@@ -27,6 +28,7 @@ class RetrievalChunk:
             "similarity": self.similarity,
             "context_source": self.context_source,
             "service_types": self.service_types if self.service_types is not None else [],
+            "clause_id": self.clause_id,
         }
         return ref
 
