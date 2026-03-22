@@ -54,6 +54,11 @@ class ComplianceEngine:
             invoice, line_items, pricing_rules
         )
 
+        # Calculate risk assessment score
+        risk_assessment_score = self._calculate_risk_assessment_score(
+            invoice, line_items, violations
+        )
+
         status = "processed"
         processed_at = datetime.utcnow().isoformat() + "Z"
         next_run_at = datetime.utcnow() + timedelta(hours=self.next_run_interval_hours)
@@ -67,6 +72,7 @@ class ComplianceEngine:
             "line_item_source": line_item_source,
             "contract_clauses": clause_references,
             "pricing_rules": pricing_rules,  # Include extracted pricing rules
+            "risk_assessment_score": risk_assessment_score,  # Add risk assessment score
             "next_run_scheduled_in_hours": self.next_run_interval_hours,
         }
 
@@ -78,10 +84,12 @@ class ComplianceEngine:
             pricing_rules=pricing_rules,
             llm_metadata={"contract_clauses": clause_references},
             next_run_at=next_run_at,
+            risk_assessment_score=risk_assessment_score,
         )
         self.db.update_invoice_compliance_metadata(
             invoice_db_id=invoice.get("id"),
             status=status,
+            risk_assessment_score=risk_assessment_score,
         )
 
         return report
@@ -89,7 +97,7 @@ class ComplianceEngine:
     def analyze_invoices_bulk(self, limit: int = 200) -> Dict[str, Any]:
         """
         Execute compliance analysis across outstanding invoices.
-        Returns summary metrics suitable for schedulers.
+        Returns array of individual reports (same format as single job) plus summary metadata.
         """
         pending_invoices = self.db.get_invoices_pending_compliance(limit=limit)
         processed_reports: List[Dict[str, Any]] = []
@@ -116,21 +124,20 @@ class ComplianceEngine:
                     }
                 )
 
-        summary = {
-            "status": "bulk_run_started",
-            "invoices_in_queue": len(pending_invoices),
+        # Return format matching analyze_invoices_explicit (array of individual reports)
+        return {
+            "status": "processed",
             "processed": len(processed_reports),
             "failed": len(failures),
+            "reports": processed_reports,  # Array of individual reports (same format as single job)
+            "errors": failures if failures else [],
+            # Additional metadata for bulk operations
+            "invoices_in_queue": len(pending_invoices),
             "violations_detected": sum(
                 len(report.get("violations", [])) for report in processed_reports
             ),
             "next_run_scheduled_in_hours": self.next_run_interval_hours,
         }
-
-        if failures:
-            summary["errors"] = failures
-
-        return summary
 
     def analyze_invoices_explicit(self, invoice_db_ids: List[int]) -> Dict[str, Any]:
         """
@@ -535,6 +542,121 @@ class ComplianceEngine:
             "violations_detected": len(violations),
         }
         return violations, summary
+
+    def _calculate_risk_assessment_score(
+        self,
+        invoice: Dict[str, Any],
+        line_items: List[Dict[str, Any]],
+        violations: List[Dict[str, Any]],
+    ) -> Optional[float]:
+        """
+        Calculate risk assessment score for an invoice.
+        
+        Formula: (total_invoice_amount - max_invoice_amount_legal) / max_invoice_amount_legal
+        
+        Where:
+        - total_invoice_amount: The total amount of the invoice (subtotal + tax)
+        - max_invoice_amount_legal: The maximum amount that would have been payable
+          if no contract rules were broken (cannot exceed total_invoice_amount)
+        
+        Returns:
+        - Risk assessment score rounded to 4 decimal places (non-negative)
+        - None if calculation cannot be performed
+        """
+        try:
+            # Calculate total_invoice_amount from invoice subtotal + tax
+            subtotal_amount = invoice.get("subtotal_amount")
+            tax_amount = invoice.get("tax_amount", 0)
+            
+            if subtotal_amount is None:
+                # Fallback: calculate from line items
+                total_invoice_amount = sum(
+                    float(item.get("total_price", 0) or 0)
+                    for item in line_items
+                )
+            else:
+                try:
+                    subtotal = float(subtotal_amount)
+                    tax = float(tax_amount) if tax_amount else 0.0
+                    total_invoice_amount = subtotal + tax
+                except (TypeError, ValueError):
+                    # Fallback: calculate from line items
+                    total_invoice_amount = sum(
+                        float(item.get("total_price", 0) or 0)
+                        for item in line_items
+                    )
+            
+            if total_invoice_amount <= 0:
+                self.logger.warning(
+                    "Cannot calculate risk score: total_invoice_amount is %s",
+                    total_invoice_amount
+                )
+                return None
+            
+            # Build a map of violations by line_id for quick lookup
+            violations_by_line_id = {}
+            for violation in violations:
+                line_id = violation.get("line_id")
+                if line_id:
+                    violations_by_line_id[line_id] = violation
+            
+            # Calculate max_invoice_amount_legal
+            # For each line item:
+            # - If there's a violation, use expected_price
+            # - If no violation, use actual total_price
+            max_invoice_amount_legal = 0.0
+            
+            for item in line_items:
+                line_id = item.get("line_id")
+                actual_total_price = self._calculate_actual_price(item)
+                
+                if line_id and line_id in violations_by_line_id:
+                    # Use expected_price from violation
+                    violation = violations_by_line_id[line_id]
+                    expected_price = violation.get("expected_price")
+                    if expected_price is not None:
+                        try:
+                            max_invoice_amount_legal += float(expected_price)
+                        except (TypeError, ValueError):
+                            # Fallback to actual price if expected_price is invalid
+                            if actual_total_price is not None:
+                                max_invoice_amount_legal += actual_total_price
+                    elif actual_total_price is not None:
+                        max_invoice_amount_legal += actual_total_price
+                else:
+                    # No violation, use actual price
+                    if actual_total_price is not None:
+                        max_invoice_amount_legal += actual_total_price
+            
+            # Ensure max_invoice_amount_legal doesn't exceed total_invoice_amount
+            if max_invoice_amount_legal > total_invoice_amount:
+                max_invoice_amount_legal = total_invoice_amount
+            
+            if max_invoice_amount_legal <= 0:
+                self.logger.warning(
+                    "Cannot calculate risk score: max_invoice_amount_legal is %s",
+                    max_invoice_amount_legal
+                )
+                return None
+            
+            # Calculate risk assessment score
+            # Formula: (total_invoice_amount - max_invoice_amount_legal) / max_invoice_amount_legal
+            score = (total_invoice_amount - max_invoice_amount_legal) / max_invoice_amount_legal
+            
+            # Ensure score is non-negative (round negative values to 0)
+            if score < 0:
+                score = 0.0
+            
+            # Round to 4 decimal places
+            return round(score, 4)
+            
+        except Exception as exc:
+            self.logger.error(
+                "Error calculating risk assessment score: %s",
+                exc,
+                exc_info=True,
+            )
+            return None
 
     def _generate_violation_reasoning(
         self,
