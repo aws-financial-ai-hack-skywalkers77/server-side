@@ -12,6 +12,8 @@ from config import Config
 from database import Database
 from compliance_engine import ComplianceEngine
 from document_processor import DocumentProcessor
+from langgraph_api import router as langgraph_router
+from langgraph_compliance.runner import LangGraphComplianceRunner
 from vectorizer import Vectorizer
 
 # Configure logging
@@ -45,6 +47,8 @@ def _s3_invoice_pdf_basename(metadata: dict, upload_filename: str) -> str:
 
 
 app = FastAPI(title="Document Processing API", version="1.0.0")
+
+app.include_router(langgraph_router, prefix="/langgraph", tags=["langgraph-compliance"])
 
 app.add_middleware(
     CORSMiddleware,
@@ -98,6 +102,11 @@ compliance_engine = ComplianceEngine(db=db, vectorizer=vectorizer)
 # Create tables on startup
 @app.on_event("startup")
 async def startup_event():
+    try:
+        app.state.langgraph_runner = LangGraphComplianceRunner(db=db, vectorizer=vectorizer)
+    except Exception as lg_exc:
+        logger.warning("LangGraph runner not initialized: %s", lg_exc)
+        app.state.langgraph_runner = None
     try:
         db.create_tables()
         logger.info("Application started successfully")

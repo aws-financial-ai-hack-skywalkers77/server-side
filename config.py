@@ -71,3 +71,14 @@ class Config:
     S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
     S3_ENABLED = os.getenv("S3_ENABLED", "true").lower() == "true"
 
+    # LangGraph compliance backend (optional web enrichment + safety)
+    LANGGRAPH_WEB_ENABLED = os.getenv("LANGGRAPH_WEB_ENABLED", "false").lower() == "true"
+    LANGGRAPH_WEB_ALLOWLIST = os.getenv("LANGGRAPH_WEB_ALLOWLIST", "")
+    LANGGRAPH_FETCH_MAX_BYTES = int(os.getenv("LANGGRAPH_FETCH_MAX_BYTES", "500000"))
+    LANGGRAPH_HTTP_TIMEOUT_SEC = float(os.getenv("LANGGRAPH_HTTP_TIMEOUT_SEC", "12"))
+    LANGGRAPH_MAX_SEARCH_HITS = int(os.getenv("LANGGRAPH_MAX_SEARCH_HITS", "5"))
+    LANGGRAPH_USER_AGENT = os.getenv(
+        "LANGGRAPH_USER_AGENT",
+        "EmpireHacks-LangGraphCompliance/1.0 (+https://example.invalid)",
+    )
+
