@@ -12,32 +12,32 @@ class DocumentProcessor:
         # Try both parameter names for API key compatibility
         self.ade_client = LandingAIADE(apikey=Config.LANDING_AI_API_KEY)
     
-    def extract_contract_data(self, document_url):
+    def extract_contract_data(self, file_path):
         """
         Extract contract data using Landing AI ADE.
-        
-        Args:
-            document_url: S3 presigned URL to the document
-        
-        Returns:
-            Dictionary with contract metadata.
+        Returns a dictionary with contract metadata.
         """
         try:
             # Parse the document
-            logger.info(f"Parsing document from S3 URL: {document_url}")
+            logger.info(f"Parsing document: {file_path}")
             logger.info("Calling Landing AI ADE parse API... (this may take a while)")
             
             # Check if API key is set
             if not Config.LANDING_AI_API_KEY:
                 raise ValueError("LANDING_AI_API_KEY is not set in environment variables")
             
-            logger.info("Sending request to Landing AI ADE with document URL...")
-            # Landing AI ADE accepts URLs directly
-            response = self.ade_client.parse(
-                document_url=document_url,
-                model="dpt-2-latest"
-            )
-            logger.info("Received response from Landing AI ADE parse API")
+            # Open file in binary mode for ADE
+            with open(file_path, 'rb') as file:
+                file_size = len(file.read())
+                file.seek(0)  # Reset file pointer
+                logger.info(f"File size: {file_size} bytes")
+                
+                logger.info("Sending request to Landing AI ADE...")
+                response = self.ade_client.parse(
+                    document=file,
+                    model="dpt-2-latest"
+                )
+                logger.info("Received response from Landing AI ADE parse API")
                 
             # Define the schema for contract extraction
             schema = {
@@ -390,17 +390,64 @@ class DocumentProcessor:
             logger.info("")
             
             # Chunk extraction details
+            # CHUNK CONTENT ANALYSIS - Verify what Landing AI actually put in each chunk
+            logger.info("")
+            logger.info("CHUNK CONTENT ANALYSIS (to verify Landing AI granularity):")
+            logger.info("-" * 80)
             for diag in diagnostic_logs:
                 status = "✓" if diag['bbox'] else "✗"
                 logger.info(f"Chunk {diag['chunk_idx']}: {status} Type={diag['type']}, "
                           f"Markdown={diag['has_markdown']}, Grounding={diag['has_grounding']}, "
                           f"Box={diag['has_box']}, TextLen={diag['text_length']}, "
                           f"Page={diag['page']}, BBox={diag['bbox']}")
+                
+                # Show actual text content to verify what Landing AI put in each chunk
+                chunk_text_preview = None
+                if diag['chunk_idx'] < len(chunk_data):
+                    chunk_text_preview = chunk_data[diag['chunk_idx']].get('original_text', '')
+                
+                if chunk_text_preview:
+                    # Show first 400 chars of text
+                    preview = chunk_text_preview[:400].replace('\n', ' | ')
+                    logger.info(f"  📄 Text content: {preview}...")
+                    
+                    # Check which line items appear in this chunk (from Landing AI's perspective)
+                    matching_line_items = []
+                    chunk_text_lower = chunk_text_preview.lower()
+                    for li in line_items:
+                        li_desc = (li.get('description') or '').lower().strip()
+                        li_service = (li.get('service_code') or '').lower().strip()
+                        
+                        # Check if line item description appears in chunk
+                        if li_desc and li_desc in chunk_text_lower:
+                            matching_line_items.append({
+                                'description': li.get('description', '')[:50],
+                                'service_code': li_service,
+                                'match_type': 'description'
+                            })
+                        elif li_service and li_service.lower() in chunk_text_lower:
+                            matching_line_items.append({
+                                'description': li.get('description', '')[:50],
+                                'service_code': li_service,
+                                'match_type': 'service_code'
+                            })
+                    
+                    if matching_line_items:
+                        logger.info(f"  ✓ Contains {len(matching_line_items)} line item(s) from Landing AI:")
+                        for match in matching_line_items:
+                            logger.info(f"     - '{match['description']}' (Service: {match['service_code']}, Match: {match['match_type']})")
+                    else:
+                        logger.info(f"  ✗ No line items found in this chunk")
+                else:
+                    logger.info(f"  ⚠ No text content available for this chunk")
+                
                 if diag['errors']:
                     for err in diag['errors']:
                         logger.info(f"  Error: {err}")
+                logger.info("")
             
-            logger.info("")
+            logger.info("OUR MATCHING LOGIC RESULTS:")
+            logger.info("-" * 80)
             logger.info(f"Line items matched: {len([m for m in matching_logs if m['matched']])} out of {len(matching_logs)}")
             for match_log in matching_logs:
                 if match_log['matched']:
@@ -416,32 +463,32 @@ class DocumentProcessor:
             # Return line items without bounding boxes if matching fails
             return line_items
     
-    def extract_invoice_data(self, document_url):
+    def extract_invoice_data(self, file_path):
         """
         Extract invoice data using Landing AI ADE.
-        
-        Args:
-            document_url: S3 presigned URL to the document
-        
-        Returns:
-            Dictionary with invoice metadata.
+        Returns a dictionary with invoice metadata.
         """
         try:
             # Parse the document
-            logger.info(f"Parsing document from S3 URL: {document_url}")
+            logger.info(f"Parsing document: {file_path}")
             logger.info("Calling Landing AI ADE parse API... (this may take a while)")
             
             # Check if API key is set
             if not Config.LANDING_AI_API_KEY:
                 raise ValueError("LANDING_AI_API_KEY is not set in environment variables")
             
-            logger.info("Sending request to Landing AI ADE with document URL...")
-            # Landing AI ADE accepts URLs directly
-            response = self.ade_client.parse(
-                document_url=document_url,
-                model="dpt-2-latest"
-            )
-            logger.info("Received response from Landing AI ADE parse API")
+            # Open file in binary mode for ADE
+            with open(file_path, 'rb') as file:
+                file_size = len(file.read())
+                file.seek(0)  # Reset file pointer
+                logger.info(f"File size: {file_size} bytes")
+                
+                logger.info("Sending request to Landing AI ADE...")
+                response = self.ade_client.parse(
+                    document=file,
+                    model="dpt-2-latest"
+                )
+                logger.info("Received response from Landing AI ADE parse API")
             
             # Define the schema for invoice extraction
             schema = {
