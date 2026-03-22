@@ -58,7 +58,7 @@ Edit `.env` and fill in your configuration:
 - `DB_USER`: Database username
 - `DB_PASSWORD`: Database password
 - `GEMINI_API_KEY`: Your Google Gemini API key (get it from [Google AI Studio](https://aistudio.google.com/))
-- `EMBEDDING_MODEL`: Embedding model (default: models/embedding-001 for Gemini)
+- `EMBEDDING_MODEL`: Embedding model (default: models/gemini-embedding-001; legacy models/embedding-001 was removed from the API)
 - `EMBEDDING_DIMENSIONS`: Vector dimensions (default: 768 for Gemini embeddings)
 - `GEMINI_GENERATION_MODEL`: Gemini model for text generation/RAG (default: gemini-1.5-flash)
 - `UPLOAD_DIR`: Temporary directory for file uploads (default: /tmp)

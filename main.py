@@ -4,7 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import os
+import re
 import logging
+import boto3
 from pathlib import Path
 from config import Config
 from database import Database
@@ -350,6 +352,25 @@ async def upload_document(
                 except Exception as e:
                     logger.warning(f"Failed to store line items for invoice {metadata.get('invoice_id')}: {e}")
                     # Don't fail the entire upload if line items fail
+
+            if Config.S3_ENABLED and Config.S3_BUCKET_NAME and invoice_db_id:
+                try:
+                    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(file.filename).name) or "invoice.pdf"
+                    s3_key = f"invoices/{invoice_db_id}/{safe_name}"
+                    s3 = boto3.client("s3", region_name=Config.AWS_REGION)
+                    s3.put_object(
+                        Bucket=Config.S3_BUCKET_NAME,
+                        Key=s3_key,
+                        Body=content,
+                        ContentType="application/pdf",
+                    )
+                    db.set_invoice_s3_key(invoice_db_id, s3_key)
+                    logger.info("Stored invoice PDF in S3: %s", s3_key)
+                except Exception as upload_err:
+                    logger.warning(
+                        "Could not upload invoice PDF to S3 (compliance highlighting may be unavailable): %s",
+                        upload_err,
+                    )
             
             logger.info(f"Successfully processed and stored invoice: {metadata.get('invoice_id')}")
             

@@ -55,7 +55,8 @@ class Vectorizer:
             result = genai.embed_content(
                 model=self.model,
                 content=text,
-                task_type="RETRIEVAL_DOCUMENT"
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=Config.EMBEDDING_DIMENSIONS,
             )
             
             # Extract the embedding vector
@@ -105,7 +106,8 @@ class Vectorizer:
             result = genai.embed_content(
                 model=self.model,
                 content=query_text,
-                task_type="RETRIEVAL_QUERY"
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=Config.EMBEDDING_DIMENSIONS,
             )
             
             # Extract the embedding vector

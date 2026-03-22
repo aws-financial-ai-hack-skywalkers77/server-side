@@ -98,7 +98,8 @@ class Database:
                     ALTER TABLE invoices
                     ADD COLUMN IF NOT EXISTS last_compliance_run_at TIMESTAMP,
                     ADD COLUMN IF NOT EXISTS compliance_status VARCHAR(50),
-                    ADD COLUMN IF NOT EXISTS risk_assessment_score DECIMAL(10, 4);
+                    ADD COLUMN IF NOT EXISTS risk_assessment_score DECIMAL(10, 4),
+                    ADD COLUMN IF NOT EXISTS s3_key VARCHAR(2048);
                 """)
 
                 # Create invoice line items table
@@ -184,10 +185,10 @@ class Database:
                 insert_query = """
                     INSERT INTO invoices (
                         invoice_id, seller_name, seller_address, tax_id,
-                        subtotal_amount, tax_amount, summary, vector
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector)
+                        subtotal_amount, tax_amount, summary, vector, s3_key
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s)
                     RETURNING id, invoice_id, seller_name, seller_address, 
-                              tax_id, subtotal_amount, tax_amount, summary, created_at;
+                              tax_id, subtotal_amount, tax_amount, summary, s3_key, created_at;
                 """
                 cur.execute(insert_query, (
                     metadata.get('invoice_id'),
@@ -197,7 +198,8 @@ class Database:
                     metadata.get('subtotal_amount'),
                     metadata.get('tax_amount'),
                     metadata.get('summary'),
-                    vector_str
+                    vector_str,
+                    metadata.get('s3_key'),
                 ))
                 result = cur.fetchone()
                 self.conn.commit()
@@ -205,6 +207,46 @@ class Database:
         except Exception as e:
             logger.error(f"Error inserting invoice: {e}")
             self.conn.rollback()
+            raise
+
+    def get_invoice_s3_key(self, invoice_db_id):
+        """Return stored S3 object key for the invoice PDF, or None."""
+        self.connect()
+        if invoice_db_id is None:
+            return None
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT s3_key FROM invoices WHERE id = %s",
+                    (invoice_db_id,),
+                )
+                row = cur.fetchone()
+                if not row or row[0] is None:
+                    return None
+                return row[0]
+        except Exception as e:
+            logger.error(f"Error reading invoice s3_key: {e}")
+            raise
+
+    def set_invoice_s3_key(self, invoice_db_id, s3_key):
+        """Persist S3 key for an invoice (e.g. after uploading the PDF)."""
+        self.connect()
+        if invoice_db_id is None:
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE invoices
+                    SET s3_key = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (s3_key, invoice_db_id),
+                )
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"Error setting invoice s3_key: {e}")
             raise
     
     def get_invoice_by_id(self, invoice_id):
