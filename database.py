@@ -682,7 +682,11 @@ class Database:
                     # Normalize vendor name for matching (remove common business suffixes)
                     vendor_normalized = vendor_name.strip()
                     # Remove common business entity suffixes for better matching
-                    for suffix in [' Inc.', ' Inc', '. Inc', ' LLC', ' Ltd.', ' Ltd', ' Corporation', ' Corp.', ' Corp']:
+                    for suffix in [
+                        ', Inc.', ', LLC', ', Ltd.', ', Corporation', ', Corp.',
+                        ' Inc.', ' Inc', '. Inc', ' LLC', ' Ltd.', ' Ltd',
+                        ' Corporation', ' Corp.', ' Corp',
+                    ]:
                         if vendor_normalized.endswith(suffix):
                             vendor_normalized = vendor_normalized[:-len(suffix)].strip()
                     
@@ -711,10 +715,16 @@ class Database:
                     filtered.append(record)
                 
                 if vendor_name and len(filtered) == 0:
-                    logger.warning(
-                        f"No contracts found matching vendor '{vendor_name}' even after similarity search. "
-                        "This may indicate the contract doesn't exist for this vendor, or vendor name doesn't match."
-                    )
+                    if len(results) == 0:
+                        logger.warning(
+                            f"No contracts found matching vendor '{vendor_name}' in vendor_name/text/summary. "
+                            "Load a contract for this vendor or align the invoice seller name with stored vendor_name."
+                        )
+                    else:
+                        logger.warning(
+                            f"{len(results)} contract(s) matched vendor '{vendor_name}' but none met "
+                            f"similarity_threshold={similarity_threshold}. Lower the threshold for vendor-scoped retrieval."
+                        )
                 
                 return filtered
         except Exception as e:
